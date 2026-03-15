@@ -167,13 +167,26 @@ class MainWindow(Gtk.ApplicationWindow):
         paned.set_shrink_start_child(False)
 
         # -- sidebar --
+        sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sidebar_box.set_size_request(180, -1)
+
         sw = Gtk.ScrolledWindow()
-        sw.set_size_request(180, -1)
+        sw.set_vexpand(True)
         self._sidebar = Gtk.ListBox()
         self._sidebar.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._sidebar.connect("row-selected", self._on_row_selected)
         sw.set_child(self._sidebar)
-        paned.set_start_child(sw)
+        sidebar_box.append(sw)
+
+        join_btn = Gtk.Button(label="Join Channel")
+        join_btn.set_margin_start(4)
+        join_btn.set_margin_end(4)
+        join_btn.set_margin_top(4)
+        join_btn.set_margin_bottom(4)
+        join_btn.connect("clicked", self._on_join_clicked)
+        sidebar_box.append(join_btn)
+
+        paned.set_start_child(sidebar_box)
 
         # -- right pane --
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -422,6 +435,17 @@ class MainWindow(Gtk.ApplicationWindow):
             row = self._network_rows.get(net_name)
             if row:
                 row.update(state)
+            meta_text = {
+                "connected": f"Connected to {net_name}",
+                "disconnected": f"Disconnected from {net_name}",
+                "connecting": f"Connecting to {net_name}...",
+            }.get(state)
+            if meta_text:
+                self._append_message({
+                    "time": datetime.now().astimezone().isoformat(),
+                    "from": "", "type": "meta", "text": meta_text,
+                })
+                self._scroll_to_bottom()
             if state == "connected":
                 self._load_sidebar()
 
@@ -429,6 +453,87 @@ class MainWindow(Gtk.ApplicationWindow):
             self._load_sidebar()
 
         return False
+
+    # -- join channel ---------------------------------------------------------
+
+    def _on_join_clicked(self, _btn: Gtk.Button) -> None:
+        networks = list(self._network_rows.keys())
+        if not networks:
+            return
+
+        dialog = Gtk.Window(
+            title="Join Channel", transient_for=self, modal=True,
+        )
+        dialog.set_default_size(320, 0)
+        dialog.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        box.append(Gtk.Label(label="Network", xalign=0))
+        net_combo = Gtk.DropDown.new_from_strings(networks)
+        if self._current_network and self._current_network in networks:
+            net_combo.set_selected(networks.index(self._current_network))
+        box.append(net_combo)
+
+        box.append(Gtk.Label(label="Channel", xalign=0))
+        chan_entry = Gtk.Entry()
+        chan_entry.set_placeholder_text("#channel")
+        box.append(chan_entry)
+
+        error_label = Gtk.Label()
+        error_label.set_wrap(True)
+        error_label.set_visible(False)
+        box.append(error_label)
+
+        btn_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        )
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: dialog.close())
+        btn_box.append(cancel_btn)
+
+        join_btn = Gtk.Button(label="Join")
+        btn_box.append(join_btn)
+        box.append(btn_box)
+
+        def do_join(_widget: Gtk.Widget) -> None:
+            idx = net_combo.get_selected()
+            net_name = networks[idx]
+            channel = chan_entry.get_text().strip()
+            if not channel:
+                return
+            if not channel.startswith(("#", "&", "+", "!")):
+                channel = "#" + channel
+            join_btn.set_sensitive(False)
+            error_label.set_visible(False)
+
+            def attempt() -> dict[str, Any]:
+                return self._app.api.join_channel(net_name, channel)
+
+            def on_ok(_result: Any) -> None:
+                dialog.close()
+                self._load_sidebar()
+
+            def on_err(exc: Exception) -> None:
+                join_btn.set_sensitive(True)
+                msg = exc.message if isinstance(exc, APIError) else str(exc)
+                error_label.set_text(msg)
+                error_label.set_visible(True)
+
+            _run_in_thread(attempt, on_ok, on_err)
+
+        join_btn.connect("clicked", do_join)
+        chan_entry.connect("activate", do_join)
+
+        dialog.set_child(box)
+        dialog.present()
 
     # -- helpers --------------------------------------------------------------
 

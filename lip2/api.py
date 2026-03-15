@@ -77,6 +77,24 @@ class LipserviceAPI:
             params=params,
         )
 
+    def join_channel(
+        self, network: str, channel: str, key: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"name": channel}
+        if key:
+            body["key"] = key
+        return self._request(
+            "POST",
+            f"/networks/{quote(network, safe='')}/channels",
+            json=body,
+        )
+
+    def part_channel(self, network: str, channel: str) -> None:
+        self._request(
+            "DELETE",
+            f"/networks/{quote(network, safe='')}/channels/{_ch(channel)}",
+        )
+
     def send_message(
         self, network: str, channel: str, text: str,
         msg_type: str = "privmsg",
