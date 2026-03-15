@@ -59,6 +59,33 @@ class LipserviceAPI:
     def get_network(self, name: str) -> dict[str, Any]:
         return self._request("GET", f"/networks/{quote(name, safe='')}")
 
+    def create_network(
+        self, name: str, host: str, port: int, tls: bool, nick: str,
+        server_password: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "name": name, "host": host, "port": port,
+            "tls": tls, "nick": nick,
+        }
+        if server_password:
+            body["server_password"] = server_password
+        return self._request("POST", "/networks", json=body)
+
+    def connect_network(self, name: str) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/networks/{quote(name, safe='')}/connect",
+        )
+
+    def disconnect_network(self, name: str) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/networks/{quote(name, safe='')}/disconnect",
+        )
+
+    def delete_network(self, name: str) -> None:
+        self._request(
+            "DELETE", f"/networks/{quote(name, safe='')}",
+        )
+
     def list_channels(self, network: str) -> list[dict[str, Any]]:
         return self._request(
             "GET", f"/networks/{quote(network, safe='')}/channels",

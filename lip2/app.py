@@ -38,6 +38,7 @@ class SidebarRow(Gtk.ListBoxRow):
         super().__init__()
         self.network = network
         self.channel = channel
+        self.net_state = state
         self._label = Gtk.Label()
         self._label.set_xalign(0)
         self._label.set_margin_start(20 if channel else 8)
@@ -48,9 +49,9 @@ class SidebarRow(Gtk.ListBoxRow):
         self.set_child(self._label)
         if not channel:
             self.set_selectable(False)
-            self.set_activatable(False)
 
     def update(self, state: str = "") -> None:
+        self.net_state = state
         if self.channel:
             self._label.set_text(self.channel)
         else:
@@ -176,16 +177,28 @@ class MainWindow(Gtk.ApplicationWindow):
         self._sidebar = Gtk.ListBox()
         self._sidebar.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._sidebar.connect("row-selected", self._on_row_selected)
+        self._sidebar.connect("row-activated", self._on_row_activated)
         sw.set_child(self._sidebar)
         sidebar_box.append(sw)
 
+        btn_bar = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+        )
+        btn_bar.set_margin_start(4)
+        btn_bar.set_margin_end(4)
+        btn_bar.set_margin_top(4)
+        btn_bar.set_margin_bottom(4)
+        btn_bar.set_homogeneous(True)
+
+        add_net_btn = Gtk.Button(label="Add Network")
+        add_net_btn.connect("clicked", self._on_add_network_clicked)
+        btn_bar.append(add_net_btn)
+
         join_btn = Gtk.Button(label="Join Channel")
-        join_btn.set_margin_start(4)
-        join_btn.set_margin_end(4)
-        join_btn.set_margin_top(4)
-        join_btn.set_margin_bottom(4)
         join_btn.connect("clicked", self._on_join_clicked)
-        sidebar_box.append(join_btn)
+        btn_bar.append(join_btn)
+
+        sidebar_box.append(btn_bar)
 
         paned.set_start_child(sidebar_box)
 
@@ -476,6 +489,123 @@ class MainWindow(Gtk.ApplicationWindow):
             self._load_sidebar()
 
         return False
+
+    # -- network management ---------------------------------------------------
+
+    def _on_row_activated(
+        self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow,
+    ) -> None:
+        if not isinstance(row, SidebarRow) or row.channel:
+            return
+        net_name = row.network
+        state = row.net_state
+        if state in ("connected", "connecting"):
+            def do_disconnect() -> dict[str, Any]:
+                return self._app.api.disconnect_network(net_name)
+            _run_in_thread(
+                do_disconnect,
+                lambda _r: self._load_sidebar(),
+                lambda e: self._show_error(str(e)),
+            )
+        else:
+            def do_connect() -> dict[str, Any]:
+                return self._app.api.connect_network(net_name)
+            _run_in_thread(
+                do_connect,
+                lambda _r: self._load_sidebar(),
+                lambda e: self._show_error(str(e)),
+            )
+
+    def _on_add_network_clicked(self, _btn: Gtk.Button) -> None:
+        dialog = Gtk.Window(
+            title="Add Network", transient_for=self, modal=True,
+        )
+        dialog.set_default_size(360, 0)
+        dialog.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        def field(label: str) -> Gtk.Entry:
+            box.append(Gtk.Label(label=label, xalign=0))
+            entry = Gtk.Entry()
+            box.append(entry)
+            return entry
+
+        name_entry = field("Name")
+        name_entry.set_placeholder_text("e.g. oftc")
+        host_entry = field("Host")
+        host_entry.set_placeholder_text("e.g. irc.oftc.net")
+        port_entry = field("Port")
+        port_entry.set_text("6697")
+        nick_entry = field("Nick")
+
+        tls_check = Gtk.CheckButton(label="Use TLS")
+        tls_check.set_active(True)
+        tls_check.set_margin_top(4)
+        box.append(tls_check)
+
+        error_label = Gtk.Label()
+        error_label.set_wrap(True)
+        error_label.set_visible(False)
+        box.append(error_label)
+
+        btn_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        )
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: dialog.close())
+        btn_box.append(cancel_btn)
+
+        add_btn = Gtk.Button(label="Add & Connect")
+        btn_box.append(add_btn)
+        box.append(btn_box)
+
+        def do_add(_widget: Gtk.Widget) -> None:
+            name = name_entry.get_text().strip()
+            host = host_entry.get_text().strip()
+            nick = nick_entry.get_text().strip()
+            try:
+                port = int(port_entry.get_text().strip())
+            except ValueError:
+                error_label.set_text("Port must be a number.")
+                error_label.set_visible(True)
+                return
+            if not name or not host or not nick:
+                error_label.set_text("Name, host, and nick are required.")
+                error_label.set_visible(True)
+                return
+            tls = tls_check.get_active()
+            add_btn.set_sensitive(False)
+            error_label.set_visible(False)
+
+            def attempt() -> dict[str, Any]:
+                self._app.api.create_network(
+                    name, host, port, tls, nick,
+                )
+                return self._app.api.connect_network(name)
+
+            def on_ok(_result: Any) -> None:
+                dialog.close()
+                self._load_sidebar()
+
+            def on_err(exc: Exception) -> None:
+                add_btn.set_sensitive(True)
+                msg = exc.message if isinstance(exc, APIError) else str(exc)
+                error_label.set_text(msg)
+                error_label.set_visible(True)
+
+            _run_in_thread(attempt, on_ok, on_err)
+
+        add_btn.connect("clicked", do_add)
+        dialog.set_child(box)
+        dialog.present()
 
     # -- join channel ---------------------------------------------------------
 
