@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import tomllib
 from datetime import datetime
 from pathlib import Path
@@ -502,16 +503,21 @@ class MainWindow(Gtk.ApplicationWindow):
         threading.Thread(target=self._sse_loop, daemon=True).start()
 
     def _sse_loop(self) -> None:
-        try:
-            for event in self._app.api.event_stream():
+        delay = 1.0
+        while self._sse_running:
+            try:
+                for event in self._app.api.event_stream():
+                    if not self._sse_running:
+                        return
+                    GLib.idle_add(self._handle_sse, event)
+                    delay = 1.0
+            except Exception:
                 if not self._sse_running:
-                    break
-                GLib.idle_add(self._handle_sse, event)
-        except Exception:
+                    return
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
             if self._sse_running:
-                GLib.idle_add(
-                    self._show_error, "Event stream disconnected",
-                )
+                GLib.idle_add(self._load_sidebar)
 
     def _handle_sse(self, event: dict[str, Any]) -> bool:
         ev_type = event["event"]
