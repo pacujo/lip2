@@ -184,25 +184,6 @@ class MainWindow(Gtk.ApplicationWindow):
         sw.set_child(self._sidebar)
         sidebar_box.append(sw)
 
-        btn_bar = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
-        )
-        btn_bar.set_margin_start(4)
-        btn_bar.set_margin_end(4)
-        btn_bar.set_margin_top(4)
-        btn_bar.set_margin_bottom(4)
-        btn_bar.set_homogeneous(True)
-
-        add_net_btn = Gtk.Button(label="Add Network")
-        add_net_btn.connect("clicked", self._on_add_network_clicked)
-        btn_bar.append(add_net_btn)
-
-        join_btn = Gtk.Button(label="Join Channel")
-        join_btn.connect("clicked", self._on_join_clicked)
-        btn_bar.append(join_btn)
-
-        sidebar_box.append(btn_bar)
-
         paned.set_start_child(sidebar_box)
 
         # -- right pane --
@@ -500,115 +481,97 @@ class MainWindow(Gtk.ApplicationWindow):
         _n_press: int, x: float, y: float,
     ) -> None:
         row = self._sidebar.get_row_at_y(int(y))
-        if not row or not isinstance(row, SidebarRow):
-            return
-        if row.channel:
-            self._show_channel_menu(row, x, y)
-            return
-        net_name = row.network
-        state = row.net_state
+        menu, box = self._make_popover(x, y)
 
-        menu = Gtk.Popover()
-        menu.set_parent(self._sidebar)
-        menu.set_pointing_to(None)
-        rect = row.compute_bounds(self._sidebar)
-        if rect[0]:
-            from gi.repository import Gdk  # noqa: E402
-            r = Gdk.Rectangle()
-            r.x = int(x)
-            r.y = int(y)
-            r.width = 1
-            r.height = 1
-            menu.set_pointing_to(r)
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        box.set_margin_top(4)
-        box.set_margin_bottom(4)
-        box.set_margin_start(4)
-        box.set_margin_end(4)
-
-        if state in ("connected", "connecting"):
-            btn = Gtk.Button(label="Disconnect")
-            btn.set_has_frame(False)
-            def on_disconnect(_b: Gtk.Button, n: str = net_name) -> None:
-                menu.popdown()
+        if isinstance(row, SidebarRow) and row.channel:
+            net_name = row.network
+            channel = row.channel or ""
+            self._menu_item(box, "Leave", lambda: (
+                self._clear_view_if_current(net_name, channel),
                 _run_in_thread(
-                    lambda: self._app.api.disconnect_network(n),
+                    lambda: self._app.api.part_channel(net_name, channel),
                     lambda _r: self._load_sidebar(),
                     lambda e: self._show_error(str(e)),
-                )
-            btn.connect("clicked", on_disconnect)
-        else:
-            btn = Gtk.Button(label="Connect")
-            btn.set_has_frame(False)
-            def on_connect(_b: Gtk.Button, n: str = net_name) -> None:
-                menu.popdown()
-                _run_in_thread(
-                    lambda: self._app.api.connect_network(n),
+                ),
+            ), menu)
+            self._menu_separator(box)
+
+        if isinstance(row, SidebarRow) and not row.channel:
+            net_name = row.network
+            state = row.net_state
+            if state in ("connected", "connecting"):
+                self._menu_item(box, "Disconnect", lambda: _run_in_thread(
+                    lambda: self._app.api.disconnect_network(net_name),
                     lambda _r: self._load_sidebar(),
                     lambda e: self._show_error(str(e)),
-                )
-            btn.connect("clicked", on_connect)
-        box.append(btn)
-
-        del_btn = Gtk.Button(label="Delete")
-        del_btn.set_has_frame(False)
-        def on_delete(_b: Gtk.Button, n: str = net_name) -> None:
-            menu.popdown()
-            _run_in_thread(
-                lambda: self._app.api.delete_network(n),
+                ), menu)
+            else:
+                self._menu_item(box, "Connect", lambda: _run_in_thread(
+                    lambda: self._app.api.connect_network(net_name),
+                    lambda _r: self._load_sidebar(),
+                    lambda e: self._show_error(str(e)),
+                ), menu)
+            self._menu_item(box, "Delete", lambda: _run_in_thread(
+                lambda: self._app.api.delete_network(net_name),
                 lambda _r: self._load_sidebar(),
                 lambda e: self._show_error(str(e)),
-            )
-        del_btn.connect("clicked", on_delete)
-        box.append(del_btn)
+            ), menu)
+            self._menu_separator(box)
+
+        self._menu_item(
+            box, "Join Channel...",
+            lambda: self._on_join_clicked(None), menu,
+        )
+        self._menu_item(
+            box, "Add Network...",
+            lambda: self._on_add_network_clicked(None), menu,
+        )
 
         menu.set_child(box)
         menu.popup()
 
-    def _show_channel_menu(
-        self, row: SidebarRow, x: float, y: float,
-    ) -> None:
-        net_name = row.network
-        channel = row.channel
-
+    def _make_popover(
+        self, x: float, y: float,
+    ) -> tuple[Gtk.Popover, Gtk.Box]:
+        from gi.repository import Gdk  # noqa: E402
         menu = Gtk.Popover()
         menu.set_parent(self._sidebar)
-        from gi.repository import Gdk  # noqa: E402
         r = Gdk.Rectangle()
         r.x = int(x)
         r.y = int(y)
         r.width = 1
         r.height = 1
         menu.set_pointing_to(r)
-
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_top(4)
         box.set_margin_bottom(4)
         box.set_margin_start(4)
         box.set_margin_end(4)
+        return menu, box
 
-        part_btn = Gtk.Button(label="Leave")
-        part_btn.set_has_frame(False)
-        def on_part(
-            _b: Gtk.Button, n: str = net_name, ch: str = channel or "",
-        ) -> None:
+    @staticmethod
+    def _menu_item(
+        box: Gtk.Box, label: str,
+        action: Callable[[], Any], menu: Gtk.Popover,
+    ) -> None:
+        btn = Gtk.Button(label=label)
+        btn.set_has_frame(False)
+        def on_click(_b: Gtk.Button) -> None:
             menu.popdown()
-            if self._current_network == n and self._current_channel == ch:
-                self._current_channel = None
-                self._header.set_text("Select a channel")
-                self._buf.set_text("")
-                self._input.set_sensitive(False)
-            _run_in_thread(
-                lambda: self._app.api.part_channel(n, ch),
-                lambda _r: self._load_sidebar(),
-                lambda e: self._show_error(str(e)),
-            )
-        part_btn.connect("clicked", on_part)
-        box.append(part_btn)
+            action()
+        btn.connect("clicked", on_click)
+        box.append(btn)
 
-        menu.set_child(box)
-        menu.popup()
+    @staticmethod
+    def _menu_separator(box: Gtk.Box) -> None:
+        box.append(Gtk.Separator())
+
+    def _clear_view_if_current(self, network: str, channel: str) -> None:
+        if self._current_network == network and self._current_channel == channel:
+            self._current_channel = None
+            self._header.set_text("Select a channel")
+            self._buf.set_text("")
+            self._input.set_sensitive(False)
 
     def _on_add_network_clicked(self, _btn: Gtk.Button) -> None:
         dialog = Gtk.Window(
