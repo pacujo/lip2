@@ -543,17 +543,18 @@ class MainWindow(Gtk.ApplicationWindow):
             row = self._network_rows.get(net_name)
             if row:
                 row.update(state)
-            meta_text = {
-                "connected": f"Connected to {net_name}",
-                "disconnected": f"Disconnected from {net_name}",
-                "connecting": f"Connecting to {net_name}...",
-            }.get(state)
-            if meta_text:
-                self._append_message({
-                    "time": datetime.now().astimezone().isoformat(),
-                    "from": "", "type": "meta", "text": meta_text,
-                })
-                self._scroll_to_bottom()
+            if net_name == self._current_network:
+                meta_text = {
+                    "connected": f"Connected to {net_name}",
+                    "disconnected": f"Disconnected from {net_name}",
+                    "connecting": f"Connecting to {net_name}...",
+                }.get(state)
+                if meta_text:
+                    self._append_message({
+                        "time": datetime.now().astimezone().isoformat(),
+                        "from": "", "type": "meta", "text": meta_text,
+                    })
+                    self._scroll_to_bottom()
             if state == "connected":
                 self._load_sidebar()
 
