@@ -486,12 +486,15 @@ class MainWindow(Gtk.ApplicationWindow):
         if isinstance(row, SidebarRow) and row.channel:
             net_name = row.network
             channel = row.channel or ""
-            self._menu_item(box, "Leave", lambda: (
-                self._clear_view_if_current(net_name, channel),
-                _run_in_thread(
-                    lambda: self._app.api.part_channel(net_name, channel),
-                    lambda _r: self._load_sidebar(),
-                    lambda e: self._show_error(str(e)),
+            self._menu_item(box, "Leave...", lambda: self._confirm(
+                f"Leave {channel}?",
+                lambda: (
+                    self._clear_view_if_current(net_name, channel),
+                    _run_in_thread(
+                        lambda: self._app.api.part_channel(net_name, channel),
+                        lambda _r: self._load_sidebar(),
+                        lambda e: self._show_error(str(e)),
+                    ),
                 ),
             ), menu)
             self._menu_separator(box)
@@ -500,10 +503,13 @@ class MainWindow(Gtk.ApplicationWindow):
             net_name = row.network
             state = row.net_state
             if state in ("connected", "connecting"):
-                self._menu_item(box, "Disconnect", lambda: _run_in_thread(
-                    lambda: self._app.api.disconnect_network(net_name),
-                    lambda _r: self._load_sidebar(),
-                    lambda e: self._show_error(str(e)),
+                self._menu_item(box, "Disconnect...", lambda: self._confirm(
+                    f"Disconnect from {net_name}?",
+                    lambda: _run_in_thread(
+                        lambda: self._app.api.disconnect_network(net_name),
+                        lambda _r: self._load_sidebar(),
+                        lambda e: self._show_error(str(e)),
+                    ),
                 ), menu)
             else:
                 self._menu_item(box, "Connect", lambda: _run_in_thread(
@@ -511,10 +517,13 @@ class MainWindow(Gtk.ApplicationWindow):
                     lambda _r: self._load_sidebar(),
                     lambda e: self._show_error(str(e)),
                 ), menu)
-            self._menu_item(box, "Delete", lambda: _run_in_thread(
-                lambda: self._app.api.delete_network(net_name),
-                lambda _r: self._load_sidebar(),
-                lambda e: self._show_error(str(e)),
+            self._menu_item(box, "Delete...", lambda: self._confirm(
+                f"Delete network {net_name}?",
+                lambda: _run_in_thread(
+                    lambda: self._app.api.delete_network(net_name),
+                    lambda _r: self._load_sidebar(),
+                    lambda e: self._show_error(str(e)),
+                ),
             ), menu)
             self._menu_separator(box)
 
@@ -565,6 +574,43 @@ class MainWindow(Gtk.ApplicationWindow):
     @staticmethod
     def _menu_separator(box: Gtk.Box) -> None:
         box.append(Gtk.Separator())
+
+    def _confirm(self, message: str, action: Callable[[], Any]) -> None:
+        dialog = Gtk.Window(
+            title="Confirm", transient_for=self, modal=True,
+        )
+        dialog.set_default_size(300, 0)
+        dialog.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        label = Gtk.Label(label=message)
+        label.set_wrap(True)
+        box.append(label)
+
+        btn_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        )
+        btn_box.set_halign(Gtk.Align.END)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: dialog.close())
+        btn_box.append(cancel_btn)
+
+        ok_btn = Gtk.Button(label="OK")
+        def on_ok(_b: Gtk.Button) -> None:
+            dialog.close()
+            action()
+        ok_btn.connect("clicked", on_ok)
+        btn_box.append(ok_btn)
+
+        box.append(btn_box)
+        dialog.set_child(box)
+        dialog.present()
 
     def _clear_view_if_current(self, network: str, channel: str) -> None:
         if self._current_network == network and self._current_channel == channel:
