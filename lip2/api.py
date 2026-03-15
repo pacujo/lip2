@@ -62,6 +62,7 @@ class LipserviceAPI:
     def create_network(
         self, name: str, host: str, port: int, tls: bool, nick: str,
         server_password: str | None = None,
+        nickserv_password: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "name": name, "host": host, "port": port,
@@ -69,6 +70,8 @@ class LipserviceAPI:
         }
         if server_password:
             body["server_password"] = server_password
+        if nickserv_password:
+            body["nickserv_password"] = nickserv_password
         return self._request("POST", "/networks", json=body)
 
     def connect_network(self, name: str) -> dict[str, Any]:

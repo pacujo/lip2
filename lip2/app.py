@@ -646,6 +646,12 @@ class MainWindow(Gtk.ApplicationWindow):
         port_entry.set_text("6697")
         nick_entry = field("Nick")
 
+        box.append(Gtk.Label(label="NickServ Password", xalign=0))
+        nickserv_entry = Gtk.Entry()
+        nickserv_entry.set_visibility(False)
+        nickserv_entry.set_placeholder_text("optional")
+        box.append(nickserv_entry)
+
         tls_check = Gtk.CheckButton(label="Use TLS")
         tls_check.set_active(True)
         tls_check.set_margin_top(4)
@@ -685,12 +691,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 error_label.set_visible(True)
                 return
             tls = tls_check.get_active()
+            ns_pass = nickserv_entry.get_text().strip() or None
             add_btn.set_sensitive(False)
             error_label.set_visible(False)
 
             def attempt() -> dict[str, Any]:
                 self._app.api.create_network(
                     name, host, port, tls, nick,
+                    nickserv_password=ns_pass,
                 )
                 return self._app.api.connect_network(name)
 
