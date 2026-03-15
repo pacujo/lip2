@@ -1,0 +1,460 @@
+from __future__ import annotations
+
+import sys
+import threading
+from datetime import datetime
+from typing import Any, Callable
+
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, GLib, Pango  # noqa: E402
+
+from lip2.api import LipserviceAPI, APIError  # noqa: E402
+
+
+def _run_in_thread(
+    func: Callable[[], Any],
+    callback: Callable[..., Any] | None = None,
+    error_callback: Callable[..., Any] | None = None,
+) -> None:
+    def worker() -> None:
+        try:
+            result = func()
+            if callback:
+                GLib.idle_add(callback, result)
+        except Exception as exc:
+            if error_callback:
+                GLib.idle_add(error_callback, exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+# -- Sidebar row -------------------------------------------------------------
+
+class SidebarRow(Gtk.ListBoxRow):
+    def __init__(
+        self, network: str, channel: str | None = None, state: str = "",
+    ) -> None:
+        super().__init__()
+        self.network = network
+        self.channel = channel
+        self._label = Gtk.Label()
+        self._label.set_xalign(0)
+        self._label.set_margin_start(20 if channel else 8)
+        self._label.set_margin_end(8)
+        self._label.set_margin_top(3)
+        self._label.set_margin_bottom(3)
+        self.update(state)
+        self.set_child(self._label)
+        if not channel:
+            self.set_selectable(False)
+            self.set_activatable(False)
+
+    def update(self, state: str = "") -> None:
+        if self.channel:
+            self._label.set_text(self.channel)
+        else:
+            suffix = ""
+            if state and state != "connected":
+                suffix = (
+                    f"  <small>({GLib.markup_escape_text(state)})</small>"
+                )
+            self._label.set_markup(
+                f"<b>{GLib.markup_escape_text(self.network)}</b>{suffix}"
+            )
+
+
+# -- Login window -------------------------------------------------------------
+
+class LoginWindow(Gtk.Window):
+    def __init__(self, app: Lip2App) -> None:
+        super().__init__(title="Lip2", application=app)
+        self._app = app
+        self.set_default_size(360, 0)
+        self.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+
+        box.append(self._field_label("Proxy URL"))
+        self._url = Gtk.Entry()
+        self._url.set_text("http://127.0.0.1:8080/api")
+        box.append(self._url)
+
+        box.append(self._field_label("Username"))
+        self._user = Gtk.Entry()
+        self._user.set_text("admin")
+        box.append(self._user)
+
+        box.append(self._field_label("Password"))
+        self._pass = Gtk.Entry()
+        self._pass.set_visibility(False)
+        self._pass.connect("activate", self._on_login)
+        box.append(self._pass)
+
+        self._error = Gtk.Label()
+        self._error.set_wrap(True)
+        self._error.set_visible(False)
+        box.append(self._error)
+
+        self._btn = Gtk.Button(label="Login")
+        self._btn.connect("clicked", self._on_login)
+        self._btn.set_margin_top(8)
+        box.append(self._btn)
+
+        self.set_child(box)
+
+    @staticmethod
+    def _field_label(text: str) -> Gtk.Label:
+        lbl = Gtk.Label(label=text)
+        lbl.set_xalign(0)
+        return lbl
+
+    def _on_login(self, _widget: Gtk.Widget) -> None:
+        url = self._url.get_text().strip()
+        user = self._user.get_text().strip()
+        pw = self._pass.get_text().strip()
+        if not url or not user:
+            return
+
+        self._btn.set_sensitive(False)
+        self._error.set_visible(False)
+
+        def attempt() -> str:
+            api = LipserviceAPI(url)
+            api.login(user, pw)
+            return api.token or ""
+
+        def on_ok(token: str) -> None:
+            self._app.api = LipserviceAPI(url)
+            self._app.api.token = token
+            self.close()
+            self._app.open_main_window()
+
+        def on_err(exc: Exception) -> None:
+            self._btn.set_sensitive(True)
+            msg = exc.message if isinstance(exc, APIError) else str(exc)
+            self._error.set_text(msg)
+            self._error.set_visible(True)
+
+        _run_in_thread(attempt, on_ok, on_err)
+
+
+# -- Main window --------------------------------------------------------------
+
+class MainWindow(Gtk.ApplicationWindow):
+    def __init__(self, app: Lip2App) -> None:
+        super().__init__(application=app, title="Lip2")
+        self._app = app
+        self.set_default_size(900, 600)
+
+        self._current_network: str | None = None
+        self._current_channel: str | None = None
+        self._last_msg_id: str | None = None
+        self._network_rows: dict[str, SidebarRow] = {}
+        self._sse_running = False
+
+        self._build_ui()
+        self._load_sidebar()
+        self._start_sse()
+
+    def _build_ui(self) -> None:
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(200)
+        paned.set_shrink_start_child(False)
+
+        # -- sidebar --
+        sw = Gtk.ScrolledWindow()
+        sw.set_size_request(180, -1)
+        self._sidebar = Gtk.ListBox()
+        self._sidebar.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._sidebar.connect("row-selected", self._on_row_selected)
+        sw.set_child(self._sidebar)
+        paned.set_start_child(sw)
+
+        # -- right pane --
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        self._header = Gtk.Label(label="Select a channel")
+        self._header.set_xalign(0)
+        self._header.set_margin_start(8)
+        self._header.set_margin_top(6)
+        self._header.set_margin_bottom(6)
+        right.append(self._header)
+        right.append(Gtk.Separator())
+
+        self._msg_sw = Gtk.ScrolledWindow()
+        self._msg_sw.set_vexpand(True)
+
+        self._msg_view = Gtk.TextView()
+        self._msg_view.set_editable(False)
+        self._msg_view.set_cursor_visible(False)
+        self._msg_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._msg_view.set_left_margin(8)
+        self._msg_view.set_right_margin(8)
+        self._msg_view.set_top_margin(4)
+        self._msg_view.set_bottom_margin(4)
+
+        self._buf = self._msg_view.get_buffer()
+        self._buf.create_tag("nick", weight=Pango.Weight.BOLD)
+        self._buf.create_tag(
+            "meta", style=Pango.Style.ITALIC, foreground="#888888",
+        )
+        self._buf.create_tag("time", foreground="#888888", scale=0.9)
+        self._buf.create_tag("action", style=Pango.Style.ITALIC)
+
+        self._msg_sw.set_child(self._msg_view)
+        right.append(self._msg_sw)
+
+        input_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+        )
+        input_box.set_margin_start(4)
+        input_box.set_margin_end(4)
+        input_box.set_margin_top(4)
+        input_box.set_margin_bottom(4)
+
+        self._input = Gtk.Entry()
+        self._input.set_hexpand(True)
+        self._input.set_placeholder_text("Type a message...")
+        self._input.connect("activate", self._on_send)
+        self._input.set_sensitive(False)
+        input_box.append(self._input)
+
+        right.append(input_box)
+        paned.set_end_child(right)
+        self.set_child(paned)
+
+    # -- sidebar loading ------------------------------------------------------
+
+    def _load_sidebar(self) -> None:
+        saved_net = self._current_network
+        saved_ch = self._current_channel
+
+        def fetch() -> list[dict[str, Any]]:
+            api = self._app.api
+            networks = api.list_networks()
+            for net in networks:
+                net["_channels"] = api.list_channels(net["name"])
+            return networks
+
+        def populate(networks: list[dict[str, Any]]) -> None:
+            self._clear_sidebar()
+            self._network_rows.clear()
+            reselect: SidebarRow | None = None
+            for net in networks:
+                net_row = SidebarRow(net["name"], state=net["state"])
+                self._sidebar.append(net_row)
+                self._network_rows[net["name"]] = net_row
+                for ch in net["_channels"]:
+                    row = SidebarRow(net["name"], channel=ch["name"])
+                    self._sidebar.append(row)
+                    if (net["name"] == saved_net
+                            and ch["name"] == saved_ch):
+                        reselect = row
+            if reselect:
+                self._sidebar.select_row(reselect)
+
+        _run_in_thread(fetch, populate, lambda e: self._show_error(str(e)))
+
+    def _clear_sidebar(self) -> None:
+        while True:
+            row = self._sidebar.get_row_at_index(0)
+            if row is None:
+                break
+            self._sidebar.remove(row)
+
+    # -- channel selection & messages -----------------------------------------
+
+    def _on_row_selected(
+        self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None,
+    ) -> None:
+        if not row or not isinstance(row, SidebarRow) or not row.channel:
+            return
+        self._current_network = row.network
+        self._current_channel = row.channel
+        self._header.set_text(f"{row.network} / {row.channel}")
+        self._input.set_sensitive(True)
+        self._input.grab_focus()
+        self._load_messages()
+
+    def _load_messages(self) -> None:
+        net = self._current_network
+        ch = self._current_channel
+        if not net or not ch:
+            return
+
+        def fetch() -> dict[str, Any]:
+            return self._app.api.list_messages(net, ch)
+
+        def display(data: dict[str, Any]) -> None:
+            if self._current_network != net or self._current_channel != ch:
+                return
+            self._buf.set_text("")
+            messages = data.get("messages", [])
+            for msg in messages:
+                self._append_message(msg)
+            if messages:
+                self._last_msg_id = messages[-1]["id"]
+            else:
+                self._last_msg_id = None
+            self._scroll_to_bottom()
+
+        _run_in_thread(fetch, display, lambda e: self._show_error(str(e)))
+
+    def _append_message(self, msg: dict[str, Any]) -> None:
+        end = self._buf.get_end_iter()
+        if self._buf.get_char_count() > 0:
+            self._buf.insert(end, "\n")
+            end = self._buf.get_end_iter()
+
+        time_str = self._format_time(msg.get("time", ""))
+        self._buf.insert_with_tags_by_name(
+            end, f"[{time_str}] ", "time",
+        )
+        end = self._buf.get_end_iter()
+
+        msg_type = msg.get("type", "privmsg")
+        sender = msg.get("from", "")
+
+        if msg_type == "meta":
+            self._buf.insert_with_tags_by_name(
+                end, f"\u2014 {msg['text']} \u2014", "meta",
+            )
+        elif msg_type == "action":
+            self._buf.insert_with_tags_by_name(
+                end, f"* {sender} {msg['text']}", "action",
+            )
+        elif msg_type == "notice":
+            self._buf.insert_with_tags_by_name(
+                end, f"-{sender}- ", "nick",
+            )
+            end = self._buf.get_end_iter()
+            self._buf.insert(end, msg["text"])
+        else:
+            self._buf.insert_with_tags_by_name(
+                end, f"<{sender}> ", "nick",
+            )
+            end = self._buf.get_end_iter()
+            self._buf.insert(end, msg["text"])
+
+    @staticmethod
+    def _format_time(iso: str) -> str:
+        if not iso:
+            return "??:??"
+        try:
+            dt = datetime.fromisoformat(iso)
+            return dt.strftime("%H:%M")
+        except ValueError:
+            return "??:??"
+
+    def _scroll_to_bottom(self) -> None:
+        def scroll() -> bool:
+            adj = self._msg_sw.get_vadjustment()
+            adj.set_value(adj.get_upper() - adj.get_page_size())
+            return False
+        GLib.idle_add(scroll)
+
+    # -- sending messages -----------------------------------------------------
+
+    def _on_send(self, _widget: Gtk.Widget) -> None:
+        text = self._input.get_text().strip()
+        if not text or not self._current_network or not self._current_channel:
+            return
+        self._input.set_text("")
+        net = self._current_network
+        ch = self._current_channel
+
+        msg_type = "privmsg"
+        if text.startswith("/me "):
+            msg_type = "action"
+            text = text[4:]
+
+        def send() -> dict[str, Any]:
+            return self._app.api.send_message(net, ch, text, msg_type)
+
+        def on_sent(msg: dict[str, Any]) -> None:
+            if self._current_network == net and self._current_channel == ch:
+                self._append_message(msg)
+                self._last_msg_id = msg.get("id", self._last_msg_id)
+                self._scroll_to_bottom()
+
+        _run_in_thread(send, on_sent, lambda e: self._show_error(str(e)))
+
+    # -- SSE event stream -----------------------------------------------------
+
+    def _start_sse(self) -> None:
+        self._sse_running = True
+        threading.Thread(target=self._sse_loop, daemon=True).start()
+
+    def _sse_loop(self) -> None:
+        try:
+            for event in self._app.api.event_stream():
+                if not self._sse_running:
+                    break
+                GLib.idle_add(self._handle_sse, event)
+        except Exception:
+            if self._sse_running:
+                GLib.idle_add(
+                    self._show_error, "Event stream disconnected",
+                )
+
+    def _handle_sse(self, event: dict[str, Any]) -> bool:
+        ev_type = event["event"]
+        data = event["data"]
+
+        if ev_type == "message":
+            net = data.get("network")
+            ch = data.get("channel")
+            if net == self._current_network and ch == self._current_channel:
+                msg_id = data.get("id", "")
+                if msg_id != self._last_msg_id:
+                    self._append_message(data)
+                    self._last_msg_id = msg_id
+                    self._scroll_to_bottom()
+
+        elif ev_type == "network_state":
+            net_name = data.get("network", "")
+            state = data.get("state", "")
+            row = self._network_rows.get(net_name)
+            if row:
+                row.update(state)
+            if state == "connected":
+                self._load_sidebar()
+
+        elif ev_type in ("join", "part", "kick"):
+            self._load_sidebar()
+
+        return False
+
+    # -- helpers --------------------------------------------------------------
+
+    def _show_error(self, message: Any) -> None:
+        end = self._buf.get_end_iter()
+        if self._buf.get_char_count() > 0:
+            self._buf.insert(end, "\n")
+            end = self._buf.get_end_iter()
+        self._buf.insert_with_tags_by_name(end, str(message), "meta")
+
+    def do_close_request(self) -> bool:
+        self._sse_running = False
+        return False
+
+
+# -- Application --------------------------------------------------------------
+
+class Lip2App(Gtk.Application):
+    def __init__(self) -> None:
+        super().__init__(application_id="org.pacujo.lip2")
+        self.api: LipserviceAPI | None = None
+
+    def do_activate(self) -> None:
+        login = LoginWindow(self)
+        login.present()
+
+    def open_main_window(self) -> None:
+        win = MainWindow(self)
+        win.present()
