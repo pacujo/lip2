@@ -154,6 +154,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._current_network: str | None = None
         self._current_channel: str | None = None
         self._last_msg_id: str | None = None
+        self._last_date: str | None = None
         self._network_rows: dict[str, SidebarRow] = {}
         self._sse_running = False
 
@@ -307,6 +308,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if self._current_network != net or self._current_channel != ch:
                 return
             self._buf.set_text("")
+            self._last_date = None
             messages = data.get("messages", [])
             for msg in messages:
                 self._append_message(msg)
@@ -319,6 +321,17 @@ class MainWindow(Gtk.ApplicationWindow):
         _run_in_thread(fetch, display, lambda e: self._show_error(str(e)))
 
     def _append_message(self, msg: dict[str, Any]) -> None:
+        date_str = self._local_date(msg.get("time", ""))
+        if date_str and date_str != self._last_date:
+            self._last_date = date_str
+            end = self._buf.get_end_iter()
+            if self._buf.get_char_count() > 0:
+                self._buf.insert(end, "\n")
+                end = self._buf.get_end_iter()
+            self._buf.insert_with_tags_by_name(
+                end, f"\u2014 {date_str} \u2014", "meta",
+            )
+
         end = self._buf.get_end_iter()
         if self._buf.get_char_count() > 0:
             self._buf.insert(end, "\n")
@@ -359,10 +372,20 @@ class MainWindow(Gtk.ApplicationWindow):
         if not iso:
             return "??:??"
         try:
-            dt = datetime.fromisoformat(iso)
+            dt = datetime.fromisoformat(iso).astimezone()
             return dt.strftime("%H:%M")
         except ValueError:
             return "??:??"
+
+    @staticmethod
+    def _local_date(iso: str) -> str | None:
+        if not iso:
+            return None
+        try:
+            dt = datetime.fromisoformat(iso).astimezone()
+            return dt.strftime("%A, %B %-d, %Y")
+        except ValueError:
+            return None
 
     def _scroll_to_bottom(self) -> None:
         def scroll() -> bool:
