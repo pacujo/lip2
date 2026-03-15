@@ -39,6 +39,10 @@ lip2/
 └── requirements.txt
 ```
 
+## Credits
+
+Brunt work by Claude (Anthropic).
+
 ## License
 
 Apache License 2.0 -- see [LICENSE](LICENSE).
