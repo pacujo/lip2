@@ -178,6 +178,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self._sidebar.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._sidebar.connect("row-selected", self._on_row_selected)
 
+        placeholder = Gtk.Label(label="Right-click to add a network")
+        placeholder.set_opacity(0.5)
+        placeholder.set_vexpand(True)
+        placeholder.set_valign(Gtk.Align.CENTER)
+        self._sidebar.set_placeholder(placeholder)
+
         click = Gtk.GestureClick(button=3)
         click.connect("pressed", self._on_sidebar_right_click)
         self._sidebar.add_controller(click)
@@ -189,7 +195,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # -- right pane --
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-        self._header = Gtk.Label(label="Select a channel")
+        self._header = Gtk.Label(label="No channel selected")
         self._header.set_xalign(0)
         self._header.set_margin_start(8)
         self._header.set_margin_top(6)
@@ -256,20 +262,44 @@ class MainWindow(Gtk.ApplicationWindow):
             self._clear_sidebar()
             self._network_rows.clear()
             reselect: SidebarRow | None = None
+            first_channel: SidebarRow | None = None
             for net in networks:
                 net_row = SidebarRow(net["name"], state=net["state"])
                 self._sidebar.append(net_row)
                 self._network_rows[net["name"]] = net_row
                 for ch in net["_channels"]:
+                    if not ch.get("joined", True):
+                        continue
                     row = SidebarRow(net["name"], channel=ch["name"])
                     self._sidebar.append(row)
+                    if first_channel is None:
+                        first_channel = row
                     if (net["name"] == saved_net
                             and ch["name"] == saved_ch):
                         reselect = row
-            if reselect:
-                self._sidebar.select_row(reselect)
+            if networks and not first_channel:
+                self._sidebar.append(self._hint_row(
+                    "Right-click to join a channel",
+                ))
+            pick = reselect or first_channel
+            if pick:
+                self._sidebar.select_row(pick)
+            else:
+                self._show_empty_hint()
 
         _run_in_thread(fetch, populate, lambda e: self._show_error(str(e)))
+
+    @staticmethod
+    def _hint_row(text: str) -> Gtk.ListBoxRow:
+        label = Gtk.Label(label=text)
+        label.set_opacity(0.5)
+        label.set_margin_top(16)
+        label.set_margin_bottom(16)
+        row = Gtk.ListBoxRow()
+        row.set_child(label)
+        row.set_selectable(False)
+        row.set_activatable(False)
+        return row
 
     def _clear_sidebar(self) -> None:
         while True:
@@ -527,9 +557,11 @@ class MainWindow(Gtk.ApplicationWindow):
             ), menu)
             self._menu_separator(box)
 
+        has_networks = bool(self._network_rows)
         self._menu_item(
             box, "Join Channel...",
             lambda: self._on_join_clicked(None), menu,
+            sensitive=has_networks,
         )
         self._menu_item(
             box, "Add Network...",
@@ -562,9 +594,11 @@ class MainWindow(Gtk.ApplicationWindow):
     def _menu_item(
         box: Gtk.Box, label: str,
         action: Callable[[], Any], menu: Gtk.Popover,
+        sensitive: bool = True,
     ) -> None:
         btn = Gtk.Button(label=label)
         btn.set_has_frame(False)
+        btn.set_sensitive(sensitive)
         def on_click(_b: Gtk.Button) -> None:
             menu.popdown()
             action()
@@ -612,12 +646,16 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.set_child(box)
         dialog.present()
 
+    def _show_empty_hint(self) -> None:
+        self._header.set_text("No channel selected")
+        self._buf.set_text("")
+        self._msg_view.grab_focus()
+        self._input.set_sensitive(False)
+
     def _clear_view_if_current(self, network: str, channel: str) -> None:
         if self._current_network == network and self._current_channel == channel:
             self._current_channel = None
-            self._header.set_text("Select a channel")
-            self._buf.set_text("")
-            self._input.set_sensitive(False)
+            self._show_empty_hint()
 
     def _on_add_network_clicked(self, _btn: Gtk.Button) -> None:
         dialog = Gtk.Window(
