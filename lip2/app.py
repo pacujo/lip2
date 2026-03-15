@@ -50,6 +50,15 @@ class SidebarRow(Gtk.ListBoxRow):
         if not channel:
             self.set_selectable(False)
 
+    def set_unread(self, unread: bool) -> None:
+        if not self.channel:
+            return
+        name = GLib.markup_escape_text(self.channel)
+        if unread:
+            self._label.set_markup(f"<b>{name}</b>")
+        else:
+            self._label.set_markup(name)
+
     def update(self, state: str = "") -> None:
         self.net_state = state
         if self.channel:
@@ -157,6 +166,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._last_msg_id: str | None = None
         self._last_date: str | None = None
         self._network_rows: dict[str, SidebarRow] = {}
+        self._channel_rows: dict[tuple[str, str], SidebarRow] = {}
         self._sse_running = False
 
         self._build_ui()
@@ -261,6 +271,7 @@ class MainWindow(Gtk.ApplicationWindow):
         def populate(networks: list[dict[str, Any]]) -> None:
             self._clear_sidebar()
             self._network_rows.clear()
+            self._channel_rows.clear()
             reselect: SidebarRow | None = None
             first_channel: SidebarRow | None = None
             for net in networks:
@@ -272,6 +283,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         continue
                     row = SidebarRow(net["name"], channel=ch["name"])
                     self._sidebar.append(row)
+                    self._channel_rows[(net["name"], ch["name"])] = row
                     if first_channel is None:
                         first_channel = row
                     if (net["name"] == saved_net
@@ -317,6 +329,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._current_network = row.network
         self._current_channel = row.channel
+        row.set_unread(False)
         self._header.set_text(f"{row.network} / {row.channel}")
         self._input.set_sensitive(True)
         self._input.grab_focus()
@@ -478,6 +491,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._append_message(data)
                     self._last_msg_id = msg_id
                     self._scroll_to_bottom()
+            else:
+                ch_row = self._channel_rows.get((net, ch))
+                if ch_row:
+                    ch_row.set_unread(True)
 
         elif ev_type == "network_state":
             net_name = data.get("network", "")
