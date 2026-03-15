@@ -15,8 +15,21 @@ pip install -r requirements.txt
 python -m lip2
 ```
 
-The login window appears on startup. Enter the proxy URL
-(default `http://127.0.0.1:8080/api`), your username, and password.
+The login window appears on startup. Enter the proxy URL, your
+username, and password.
+
+## Configuration
+
+Lip2 reads `~/.config/lip2/config.toml` on startup to pre-fill the
+login dialog. On successful login the URL and username are saved back
+automatically. The password is never saved.
+
+```toml
+url = "http://127.0.0.1:8080/api"
+username = "admin"
+```
+
+Both fields are optional and default to the values shown above.
 
 ## Usage
 

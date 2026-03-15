@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sys
 import threading
+import tomllib
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 import gi
@@ -74,6 +76,36 @@ class SidebarRow(Gtk.ListBoxRow):
             )
 
 
+# -- Config -------------------------------------------------------------------
+
+_CONFIG_DIR = Path.home() / ".config" / "lip2"
+_CONFIG_FILE = _CONFIG_DIR / "config.toml"
+
+_DEFAULTS = {
+    "url": "http://127.0.0.1:8080/api",
+    "username": "admin",
+}
+
+
+def _load_config() -> dict[str, str]:
+    cfg: dict[str, str] = dict(_DEFAULTS)
+    try:
+        with open(_CONFIG_FILE, "rb") as f:
+            cfg.update(tomllib.load(f))
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def _save_config(url: str, username: str) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f'url = "{url}"\n',
+        f'username = "{username}"\n',
+    ]
+    _CONFIG_FILE.write_text("".join(lines))
+
+
 # -- Login window -------------------------------------------------------------
 
 class LoginWindow(Gtk.Window):
@@ -89,14 +121,16 @@ class LoginWindow(Gtk.Window):
         box.set_margin_start(20)
         box.set_margin_end(20)
 
+        cfg = _load_config()
+
         box.append(self._field_label("Proxy URL"))
         self._url = Gtk.Entry()
-        self._url.set_text("http://127.0.0.1:8080/api")
+        self._url.set_text(cfg.get("url", ""))
         box.append(self._url)
 
         box.append(self._field_label("Username"))
         self._user = Gtk.Entry()
-        self._user.set_text("admin")
+        self._user.set_text(cfg.get("username", ""))
         box.append(self._user)
 
         box.append(self._field_label("Password"))
@@ -139,6 +173,7 @@ class LoginWindow(Gtk.Window):
             return api.token or ""
 
         def on_ok(token: str) -> None:
+            _save_config(url, user)
             self._app.api = LipserviceAPI(url)
             self._app.api.token = token
             self.close()
