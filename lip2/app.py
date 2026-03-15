@@ -485,16 +485,10 @@ class MainWindow(Gtk.ApplicationWindow):
             msg_type = "action"
             text = text[4:]
 
-        def send() -> dict[str, Any]:
-            return self._app.api.send_message(net, ch, text, msg_type)
+        def send() -> None:
+            self._app.api.send_message(net, ch, text, msg_type)
 
-        def on_sent(msg: dict[str, Any]) -> None:
-            if self._current_network == net and self._current_channel == ch:
-                self._append_message(msg)
-                self._last_msg_id = msg.get("id", self._last_msg_id)
-                self._scroll_to_bottom()
-
-        _run_in_thread(send, on_sent, lambda e: self._show_error(str(e)))
+        _run_in_thread(send, None, lambda e: self._show_error(str(e)))
 
     # -- SSE event stream -----------------------------------------------------
 
