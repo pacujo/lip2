@@ -36,27 +36,35 @@ def _run_in_thread(
 
 class SidebarRow(Gtk.ListBoxRow):
     def __init__(
-        self, network: str, channel: str | None = None, state: str = "",
+        self, network: str, channel: str | None = None,
+        query: str | None = None, state: str = "",
     ) -> None:
         super().__init__()
         self.network = network
         self.channel = channel
+        self.query = query
         self.net_state = state
         self._label = Gtk.Label()
         self._label.set_xalign(0)
-        self._label.set_margin_start(20 if channel else 8)
+        self._label.set_margin_start(20 if (channel or query) else 8)
         self._label.set_margin_end(8)
         self._label.set_margin_top(3)
         self._label.set_margin_bottom(3)
         self.update(state)
         self.set_child(self._label)
-        if not channel:
+        if not channel and not query:
             self.set_selectable(False)
 
+    @property
+    def is_selectable_target(self) -> bool:
+        return self.channel is not None or self.query is not None
+
     def set_unread(self, unread: bool) -> None:
-        if not self.channel:
+        if not self.is_selectable_target:
             return
-        name = GLib.markup_escape_text(self.channel)
+        name = GLib.markup_escape_text(self.channel or self.query or "")
+        if self.query:
+            name = f"<i>{name}</i>"
         if unread:
             self._label.set_markup(f"<b>{name}</b>")
         else:
@@ -66,6 +74,10 @@ class SidebarRow(Gtk.ListBoxRow):
         self.net_state = state
         if self.channel:
             self._label.set_text(self.channel)
+        elif self.query:
+            self._label.set_markup(
+                f"<i>{GLib.markup_escape_text(self.query)}</i>"
+            )
         else:
             suffix = ""
             if state and state != "connected":
@@ -199,10 +211,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._current_network: str | None = None
         self._current_channel: str | None = None
+        self._current_query: str | None = None
         self._last_msg_id: str | None = None
         self._last_date: str | None = None
         self._network_rows: dict[str, SidebarRow] = {}
         self._channel_rows: dict[tuple[str, str], SidebarRow] = {}
+        self._query_rows: dict[tuple[str, str], SidebarRow] = {}
         self._sse_running = False
 
         self._build_ui()
@@ -296,20 +310,23 @@ class MainWindow(Gtk.ApplicationWindow):
     def _load_sidebar(self) -> None:
         saved_net = self._current_network
         saved_ch = self._current_channel
+        saved_q = self._current_query
 
         def fetch() -> list[dict[str, Any]]:
             api = self._app.api
             networks = api.list_networks()
             for net in networks:
                 net["_channels"] = api.list_channels(net["name"])
+                net["_queries"] = api.list_queries(net["name"])
             return networks
 
         def populate(networks: list[dict[str, Any]]) -> None:
             self._clear_sidebar()
             self._network_rows.clear()
             self._channel_rows.clear()
+            self._query_rows.clear()
             reselect: SidebarRow | None = None
-            first_channel: SidebarRow | None = None
+            first_selectable: SidebarRow | None = None
             for net in networks:
                 net_row = SidebarRow(net["name"], state=net["state"])
                 self._sidebar.append(net_row)
@@ -320,16 +337,26 @@ class MainWindow(Gtk.ApplicationWindow):
                     row = SidebarRow(net["name"], channel=ch["name"])
                     self._sidebar.append(row)
                     self._channel_rows[(net["name"], ch["name"])] = row
-                    if first_channel is None:
-                        first_channel = row
+                    if first_selectable is None:
+                        first_selectable = row
                     if (net["name"] == saved_net
                             and ch["name"] == saved_ch):
                         reselect = row
-            if networks and not first_channel:
+                for q in net["_queries"]:
+                    nick = q["nick"]
+                    row = SidebarRow(net["name"], query=nick)
+                    self._sidebar.append(row)
+                    self._query_rows[(net["name"], nick)] = row
+                    if first_selectable is None:
+                        first_selectable = row
+                    if (net["name"] == saved_net
+                            and nick == saved_q):
+                        reselect = row
+            if networks and not first_selectable:
                 self._sidebar.append(self._hint_row(
                     "Right-click to join a channel",
                 ))
-            pick = reselect or first_channel
+            pick = reselect or first_selectable
             if pick:
                 self._sidebar.select_row(pick)
             else:
@@ -356,17 +383,35 @@ class MainWindow(Gtk.ApplicationWindow):
                 break
             self._sidebar.remove(row)
 
+    def _add_query_row(
+        self, network: str, nick: str, unread: bool = False,
+    ) -> SidebarRow:
+        row = SidebarRow(network, query=nick)
+        self._sidebar.append(row)
+        self._query_rows[(network, nick)] = row
+        if unread:
+            row.set_unread(True)
+        return row
+
     # -- channel selection & messages -----------------------------------------
 
     def _on_row_selected(
         self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None,
     ) -> None:
-        if not row or not isinstance(row, SidebarRow) or not row.channel:
+        if not row or not isinstance(row, SidebarRow):
+            return
+        if not row.is_selectable_target:
             return
         self._current_network = row.network
-        self._current_channel = row.channel
+        if row.channel:
+            self._current_channel = row.channel
+            self._current_query = None
+            self._header.set_text(f"{row.network} / {row.channel}")
+        elif row.query:
+            self._current_channel = None
+            self._current_query = row.query
+            self._header.set_text(f"{row.network} / {row.query}")
         row.set_unread(False)
-        self._header.set_text(f"{row.network} / {row.channel}")
         self._input.set_sensitive(True)
         self._input.grab_focus()
         self._load_messages()
@@ -374,14 +419,21 @@ class MainWindow(Gtk.ApplicationWindow):
     def _load_messages(self) -> None:
         net = self._current_network
         ch = self._current_channel
-        if not net or not ch:
+        q = self._current_query
+        if not net or (not ch and not q):
             return
 
         def fetch() -> dict[str, Any]:
-            return self._app.api.list_messages(net, ch)
+            if ch:
+                return self._app.api.list_messages(net, ch)
+            return self._app.api.list_private_messages(net, q)
 
         def display(data: dict[str, Any]) -> None:
-            if self._current_network != net or self._current_channel != ch:
+            if self._current_network != net:
+                return
+            if ch and self._current_channel != ch:
+                return
+            if q and self._current_query != q:
                 return
             self._buf.set_text("")
             self._last_date = None
@@ -474,11 +526,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _on_send(self, _widget: Gtk.Widget) -> None:
         text = self._input.get_text().strip()
-        if not text or not self._current_network or not self._current_channel:
-            return
-        self._input.set_text("")
         net = self._current_network
         ch = self._current_channel
+        q = self._current_query
+        if not text or not net or (not ch and not q):
+            return
+        self._input.set_text("")
 
         msg_type = "privmsg"
         if text.startswith("/me "):
@@ -486,7 +539,10 @@ class MainWindow(Gtk.ApplicationWindow):
             text = text[4:]
 
         def send() -> None:
-            self._app.api.send_message(net, ch, text, msg_type)
+            if ch:
+                self._app.api.send_message(net, ch, text, msg_type)
+            else:
+                self._app.api.send_private_message(net, q, text, msg_type)
 
         _run_in_thread(send, None, lambda e: self._show_error(str(e)))
 
@@ -520,16 +576,33 @@ class MainWindow(Gtk.ApplicationWindow):
         if ev_type == "message":
             net = data.get("network")
             ch = data.get("channel")
-            if net == self._current_network and ch == self._current_channel:
-                msg_id = data.get("id", "")
-                if msg_id != self._last_msg_id:
-                    self._append_message(data)
-                    self._last_msg_id = msg_id
-                    self._scroll_to_bottom()
-            else:
-                ch_row = self._channel_rows.get((net, ch))
-                if ch_row:
-                    ch_row.set_unread(True)
+            nick = data.get("nick")
+            if ch:
+                if (net == self._current_network
+                        and ch == self._current_channel):
+                    msg_id = data.get("id", "")
+                    if msg_id != self._last_msg_id:
+                        self._append_message(data)
+                        self._last_msg_id = msg_id
+                        self._scroll_to_bottom()
+                else:
+                    ch_row = self._channel_rows.get((net, ch))
+                    if ch_row:
+                        ch_row.set_unread(True)
+            elif nick:
+                if (net == self._current_network
+                        and nick == self._current_query):
+                    msg_id = data.get("id", "")
+                    if msg_id != self._last_msg_id:
+                        self._append_message(data)
+                        self._last_msg_id = msg_id
+                        self._scroll_to_bottom()
+                else:
+                    q_row = self._query_rows.get((net, nick))
+                    if q_row:
+                        q_row.set_unread(True)
+                    elif net:
+                        self._add_query_row(net, nick, unread=True)
 
         elif ev_type == "network_state":
             net_name = data.get("network", "")
@@ -565,6 +638,22 @@ class MainWindow(Gtk.ApplicationWindow):
     ) -> None:
         row = self._sidebar.get_row_at_y(int(y))
         menu, box = self._make_popover(x, y)
+
+        if isinstance(row, SidebarRow) and row.query:
+            net_name = row.network
+            nick = row.query
+            self._menu_item(box, "Close...", lambda: self._confirm(
+                f"Close conversation with {nick}?",
+                lambda: (
+                    self._clear_view_if_query(net_name, nick),
+                    _run_in_thread(
+                        lambda: self._app.api.close_query(net_name, nick),
+                        lambda _r: self._load_sidebar(),
+                        lambda e: self._show_error(str(e)),
+                    ),
+                ),
+            ), menu)
+            self._menu_separator(box)
 
         if isinstance(row, SidebarRow) and row.channel:
             net_name = row.network
@@ -701,6 +790,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _show_empty_hint(self) -> None:
         self._header.set_text("No channel selected")
+        self._current_channel = None
+        self._current_query = None
         self._buf.set_text("")
         self._msg_view.grab_focus()
         self._input.set_sensitive(False)
@@ -708,6 +799,11 @@ class MainWindow(Gtk.ApplicationWindow):
     def _clear_view_if_current(self, network: str, channel: str) -> None:
         if self._current_network == network and self._current_channel == channel:
             self._current_channel = None
+            self._show_empty_hint()
+
+    def _clear_view_if_query(self, network: str, nick: str) -> None:
+        if self._current_network == network and self._current_query == nick:
+            self._current_query = None
             self._show_empty_hint()
 
     def _on_add_network_clicked(self, _btn: Gtk.Button) -> None:

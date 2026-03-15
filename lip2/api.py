@@ -135,6 +135,41 @@ class LipserviceAPI:
             json={"text": text, "type": msg_type},
         )
 
+    def list_queries(self, network: str) -> list[dict[str, str]]:
+        return self._request(
+            "GET",
+            f"/networks/{quote(network, safe='')}/queries",
+        )
+
+    def list_private_messages(
+        self, network: str, nick: str,
+        limit: int = 200, after: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if after:
+            params["after"] = after
+        return self._request(
+            "GET",
+            f"/networks/{quote(network, safe='')}/messages/{quote(nick, safe='')}",
+            params=params,
+        )
+
+    def send_private_message(
+        self, network: str, nick: str, text: str,
+        msg_type: str = "privmsg",
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/networks/{quote(network, safe='')}/messages/{quote(nick, safe='')}",
+            json={"text": text, "type": msg_type},
+        )
+
+    def close_query(self, network: str, nick: str) -> None:
+        self._request(
+            "DELETE",
+            f"/networks/{quote(network, safe='')}/messages/{quote(nick, safe='')}",
+        )
+
     def event_stream(self) -> Generator[dict[str, Any], None, None]:
         stream_client = httpx.Client(
             base_url=self.base_url, timeout=None,
