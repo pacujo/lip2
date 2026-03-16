@@ -244,6 +244,7 @@ class MainWindow(Gtk.ApplicationWindow):
         placeholder.set_valign(Gtk.Align.CENTER)
         self._sidebar.set_placeholder(placeholder)
 
+        self._popover: Gtk.Popover | None = None
         click = Gtk.GestureClick(button=3)
         click.connect("pressed", self._on_sidebar_right_click)
         self._sidebar.add_controller(click)
@@ -758,12 +759,22 @@ class MainWindow(Gtk.ApplicationWindow):
         menu.set_child(box)
         menu.popup()
 
+    def _dismiss_popover(self) -> None:
+        popover = self._popover
+        if popover is not None:
+            self._popover = None
+            popover.popdown()
+            popover.unparent()
+
     def _make_popover(
         self, x: float, y: float,
     ) -> tuple[Gtk.Popover, Gtk.Box]:
         from gi.repository import Gdk  # noqa: E402
+        self._dismiss_popover()
         menu = Gtk.Popover()
         menu.set_parent(self._sidebar)
+        menu.connect("closed", lambda _p: self._dismiss_popover())
+        self._popover = menu
         r = Gdk.Rectangle()
         r.x = int(x)
         r.y = int(y)
@@ -1042,6 +1053,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def do_close_request(self) -> bool:
         self._sse_running = False
+        self._dismiss_popover()
         self._update_pointer()
         self._save_session()
         return False
