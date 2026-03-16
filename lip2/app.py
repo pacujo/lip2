@@ -1234,6 +1234,9 @@ class MainWindow(Gtk.ApplicationWindow):
             _run_in_thread(attempt, on_ok, on_err)
 
         add_btn.connect("clicked", do_add)
+        for entry in (name_entry, host_entry, port_entry,
+                       nick_entry, nickserv_entry):
+            entry.connect("activate", do_add)
         dialog.set_child(box)
         dialog.present()
 
