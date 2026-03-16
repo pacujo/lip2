@@ -217,11 +217,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._network_rows: dict[str, SidebarRow] = {}
         self._channel_rows: dict[tuple[str, str], SidebarRow] = {}
         self._query_rows: dict[tuple[str, str], SidebarRow] = {}
+        self._pointers: dict[str, str] = {}
         self._sse_running = False
 
         self._build_ui()
-        self._load_sidebar()
-        self._start_sse()
+        self._restore_session()
 
     def _build_ui(self) -> None:
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -304,6 +304,49 @@ class MainWindow(Gtk.ApplicationWindow):
         right.append(input_box)
         paned.set_end_child(right)
         self.set_child(paned)
+
+    # -- session management ---------------------------------------------------
+
+    def _restore_session(self) -> None:
+        def fetch() -> dict[str, Any]:
+            try:
+                return self._app.api.get_session()
+            except Exception:
+                return {}
+
+        def apply(data: dict[str, Any]) -> None:
+            self._pointers = data.get("pointers", {})
+            self._current_network = data.get("current_network")
+            self._current_channel = data.get("current_channel")
+            self._current_query = data.get("current_query")
+            self._load_sidebar()
+            self._start_sse()
+
+        _run_in_thread(fetch, apply)
+
+    def _save_session(self) -> None:
+        data: dict[str, Any] = {
+            "current_network": self._current_network,
+            "current_channel": self._current_channel,
+            "current_query": self._current_query,
+            "pointers": self._pointers,
+        }
+
+        def save() -> None:
+            try:
+                self._app.api.save_session(data)
+            except Exception:
+                pass
+
+        _run_in_thread(save)
+
+    def _update_pointer(self) -> None:
+        if not self._current_network or not self._last_msg_id:
+            return
+        target = self._current_channel or self._current_query
+        if target:
+            key = f"{self._current_network}/{target}"
+            self._pointers[key] = self._last_msg_id
 
     # -- sidebar loading ------------------------------------------------------
 
@@ -402,6 +445,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not row.is_selectable_target:
             return
+        self._update_pointer()
         self._current_network = row.network
         if row.channel:
             self._current_channel = row.channel
@@ -415,6 +459,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._input.set_sensitive(True)
         self._input.grab_focus()
         self._load_messages()
+        self._save_session()
 
     def _load_messages(self) -> None:
         net = self._current_network
@@ -997,6 +1042,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def do_close_request(self) -> bool:
         self._sse_running = False
+        self._update_pointer()
+        self._save_session()
         return False
 
 

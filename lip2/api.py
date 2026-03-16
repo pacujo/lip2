@@ -170,6 +170,12 @@ class LipserviceAPI:
             f"/networks/{quote(network, safe='')}/messages/{quote(nick, safe='')}",
         )
 
+    def get_session(self) -> dict[str, Any]:
+        return self._request("GET", "/session")
+
+    def save_session(self, data: dict[str, Any]) -> None:
+        self._request("PUT", "/session", json=data)
+
     def event_stream(self) -> Generator[dict[str, Any], None, None]:
         stream_client = httpx.Client(
             base_url=self.base_url, timeout=None,
