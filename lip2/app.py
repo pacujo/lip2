@@ -13,6 +13,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib, Pango  # noqa: E402
 
 from lip2.api import LipserviceAPI, APIError  # noqa: E402
+from lip2.irc_format import parse as parse_irc  # noqa: E402
 
 
 def _run_in_thread(
@@ -283,6 +284,11 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self._buf.create_tag("time", foreground="#888888", scale=0.9)
         self._buf.create_tag("action", style=Pango.Style.ITALIC)
+        self._buf.create_tag("irc_bold", weight=Pango.Weight.BOLD)
+        self._buf.create_tag("irc_italic", style=Pango.Style.ITALIC)
+        self._buf.create_tag("irc_underline", underline=Pango.Underline.SINGLE)
+        self._buf.create_tag("irc_strike", strikethrough=True)
+        self._buf.create_tag("irc_mono", family="Monospace")
 
         self._msg_sw.set_child(self._msg_view)
         right.append(self._msg_sw)
@@ -526,20 +532,64 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         elif msg_type == "action":
             self._buf.insert_with_tags_by_name(
-                end, f"* {sender} {msg['text']}", "action",
+                end, f"* {sender} ", "action",
             )
+            self._insert_irc_formatted(msg["text"], base_tags=["action"])
         elif msg_type == "notice":
             self._buf.insert_with_tags_by_name(
                 end, f"-{sender}- ", "nick",
             )
-            end = self._buf.get_end_iter()
-            self._buf.insert(end, msg["text"])
+            self._insert_irc_formatted(msg["text"])
         else:
             self._buf.insert_with_tags_by_name(
                 end, f"<{sender}> ", "nick",
             )
+            self._insert_irc_formatted(msg["text"])
+
+    def _get_color_tag(
+        self, color: str, prop: str,
+    ) -> Gtk.TextTag:
+        name = f"irc_{prop}_{color}"
+        tag = self._buf.get_tag_table().lookup(name)
+        if tag is None:
+            if prop == "fg":
+                tag = self._buf.create_tag(name, foreground=color)
+            else:
+                tag = self._buf.create_tag(name, background=color)
+        return tag
+
+    def _insert_irc_formatted(
+        self, text: str, base_tags: list[str] | None = None,
+    ) -> None:
+        tag_table = self._buf.get_tag_table()
+        style_map = {
+            "bold": "irc_bold", "italic": "irc_italic",
+            "underline": "irc_underline", "strikethrough": "irc_strike",
+            "monospace": "irc_mono",
+        }
+        for span_text, styles in parse_irc(text):
+            tags: list[Gtk.TextTag] = []
+            if base_tags:
+                for bt in base_tags:
+                    tag = tag_table.lookup(bt)
+                    if tag:
+                        tags.append(tag)
+            for key, tag_name in style_map.items():
+                if styles.get(key):
+                    tag = tag_table.lookup(tag_name)
+                    if tag:
+                        tags.append(tag)
+            fg = styles.get("fg")
+            if isinstance(fg, str):
+                tags.append(self._get_color_tag(fg, "fg"))
+            bg = styles.get("bg")
+            if isinstance(bg, str):
+                tags.append(self._get_color_tag(bg, "bg"))
             end = self._buf.get_end_iter()
-            self._buf.insert(end, msg["text"])
+            if tags:
+                self._buf.insert_with_tags(end, span_text, *tags)
+            else:
+                self._buf.insert(end, span_text)
 
     @staticmethod
     def _format_time(iso: str) -> str:
