@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import gi
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, GLib, Pango  # noqa: E402
+from gi.repository import Gdk, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from lip2.api import LipserviceAPI, APIError  # noqa: E402
 from lip2.irc_format import parse as parse_irc  # noqa: E402
@@ -202,6 +203,233 @@ class LoginWindow(Gtk.Window):
         _run_in_thread(attempt, on_ok, on_err)
 
 
+# -- Formatted input ----------------------------------------------------------
+
+_TOGGLE_TAGS: dict[int, str] = {
+    Gdk.KEY_b: "irc_bold",
+    Gdk.KEY_i: "irc_italic",
+    Gdk.KEY_u: "irc_underline",
+}
+
+_TAG_TO_IRC: dict[str, str] = {
+    "irc_bold": "\x02",
+    "irc_italic": "\x1D",
+    "irc_underline": "\x1F",
+    "irc_strike": "\x1E",
+    "irc_mono": "\x11",
+}
+
+
+class FormattedInput(Gtk.Frame):
+    """Single-line WYSIWYG input with IRC formatting support.
+
+    Signals:
+        send: emitted when the user presses Enter.
+    """
+
+    __gsignals__ = {
+        "send": (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        toolbar.set_margin_start(4)
+        toolbar.set_margin_top(2)
+        toolbar.set_margin_bottom(2)
+        self._toggle_buttons: dict[str, Gtk.ToggleButton] = {}
+        for tag_name, label, tooltip in (
+            ("irc_bold", "B", "Bold (Ctrl+B)"),
+            ("irc_italic", "I", "Italic (Ctrl+I)"),
+            ("irc_underline", "U", "Underline (Ctrl+U)"),
+        ):
+            btn = Gtk.ToggleButton(label=label)
+            btn.set_has_frame(False)
+            btn.set_focusable(False)
+            btn.set_tooltip_text(tooltip)
+            btn.connect("toggled", self._on_toolbar_toggle, tag_name)
+            toolbar.append(btn)
+            self._toggle_buttons[tag_name] = btn
+        # Style the labels to hint at their function
+        bold_btn = self._toggle_buttons["irc_bold"]
+        bold_btn.get_child().set_markup("<b>B</b>")
+        italic_btn = self._toggle_buttons["irc_italic"]
+        italic_btn.get_child().set_markup("<i>I</i>")
+        underline_btn = self._toggle_buttons["irc_underline"]
+        underline_btn.get_child().set_markup("<u>U</u>")
+
+        vbox.append(toolbar)
+
+        self._view = Gtk.TextView()
+        self._view.set_wrap_mode(Gtk.WrapMode.NONE)
+        self._view.set_accepts_tab(False)
+        self._view.set_top_margin(4)
+        self._view.set_bottom_margin(4)
+        self._view.set_left_margin(6)
+        self._view.set_right_margin(6)
+
+        self._ibuf = self._view.get_buffer()
+        self._ibuf.create_tag("irc_bold", weight=Pango.Weight.BOLD)
+        self._ibuf.create_tag("irc_italic", style=Pango.Style.ITALIC)
+        self._ibuf.create_tag(
+            "irc_underline", underline=Pango.Underline.SINGLE,
+        )
+        self._ibuf.create_tag("irc_strike", strikethrough=True)
+        self._ibuf.create_tag("irc_mono", family="Monospace")
+
+        self._active_tags: set[str] = set()
+        self._updating_buttons = False
+        self._ibuf.connect("insert-text", self._on_insert_text)
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self._on_key)
+        self._view.add_controller(key_ctrl)
+
+        vbox.append(self._view)
+        self.set_child(vbox)
+
+    def get_irc_text(self) -> str:
+        """Serialize the buffer contents to IRC-formatted text."""
+        start = self._ibuf.get_start_iter()
+        end = self._ibuf.get_end_iter()
+        if start.equal(end):
+            return ""
+        return self._serialize(start, end)
+
+    def clear(self) -> None:
+        self._ibuf.set_text("")
+        self._active_tags.clear()
+        self._sync_buttons()
+
+    def grab_focus(self) -> bool:
+        return self._view.grab_focus()
+
+    def _sync_buttons(self) -> None:
+        self._updating_buttons = True
+        for tag_name, btn in self._toggle_buttons.items():
+            btn.set_active(tag_name in self._active_tags)
+        self._updating_buttons = False
+
+    def _toggle_tag(self, tag_name: str) -> None:
+        if tag_name in self._active_tags:
+            self._active_tags.discard(tag_name)
+        else:
+            self._active_tags.add(tag_name)
+        self._apply_to_selection(tag_name)
+        self._sync_buttons()
+
+    def _on_toolbar_toggle(
+        self, btn: Gtk.ToggleButton, tag_name: str,
+    ) -> None:
+        if self._updating_buttons:
+            return
+        self._toggle_tag(tag_name)
+        self._view.grab_focus()
+
+    def _on_key(
+        self, _ctrl: Gtk.EventControllerKey,
+        keyval: int, _keycode: int, state: Gdk.ModifierType,
+    ) -> bool:
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            if not (state & (Gdk.ModifierType.SHIFT_MASK
+                             | Gdk.ModifierType.CONTROL_MASK)):
+                self.emit("send")
+                return True
+
+        if not (state & Gdk.ModifierType.CONTROL_MASK):
+            return False
+
+        tag_name = _TOGGLE_TAGS.get(keyval)
+        if tag_name is not None:
+            self._toggle_tag(tag_name)
+            return True
+
+        if keyval == Gdk.KEY_o:
+            self._active_tags.clear()
+            self._clear_selection_tags()
+            self._sync_buttons()
+            return True
+
+        return False
+
+    def _on_insert_text(
+        self, buf: Gtk.TextBuffer, loc: Gtk.TextIter,
+        text: str, _length: int,
+    ) -> None:
+        if not self._active_tags:
+            return
+
+        def apply_after() -> bool:
+            end = buf.get_iter_at_mark(buf.get_insert())
+            start = end.copy()
+            start.backward_chars(len(text))
+            for tag_name in self._active_tags:
+                tag = buf.get_tag_table().lookup(tag_name)
+                if tag:
+                    buf.apply_tag(tag, start, end)
+            return False
+
+        GLib.idle_add(apply_after)
+
+    def _apply_to_selection(self, tag_name: str) -> None:
+        sel = self._ibuf.get_selection_bounds()
+        if not sel:
+            return
+        start, end = sel
+        tag = self._ibuf.get_tag_table().lookup(tag_name)
+        if not tag:
+            return
+        if start.has_tag(tag):
+            self._ibuf.remove_tag(tag, start, end)
+        else:
+            self._ibuf.apply_tag(tag, start, end)
+
+    def _clear_selection_tags(self) -> None:
+        sel = self._ibuf.get_selection_bounds()
+        if not sel:
+            return
+        start, end = sel
+        for tag_name in _TAG_TO_IRC:
+            tag = self._ibuf.get_tag_table().lookup(tag_name)
+            if tag:
+                self._ibuf.remove_tag(tag, start, end)
+
+    def _serialize(
+        self, start: Gtk.TextIter, end: Gtk.TextIter,
+    ) -> str:
+        """Walk the buffer and emit IRC control codes at tag boundaries."""
+        result: list[str] = []
+        it = start.copy()
+        prev_tags: set[str] = set()
+
+        while it.compare(end) < 0:
+            cur_tags: set[str] = set()
+            for tag in it.get_tags():
+                name = tag.props.name
+                if name and name in _TAG_TO_IRC:
+                    cur_tags.add(name)
+
+            turned_off = prev_tags - cur_tags
+            turned_on = cur_tags - prev_tags
+
+            if turned_off or turned_on:
+                for tag_name in turned_off:
+                    result.append(_TAG_TO_IRC[tag_name])
+                for tag_name in turned_on:
+                    result.append(_TAG_TO_IRC[tag_name])
+
+            result.append(it.get_char())
+            prev_tags = cur_tags
+            it.forward_char()
+
+        if prev_tags:
+            result.append("\x0F")
+
+        return "".join(result)
+
+
 # -- Main window --------------------------------------------------------------
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -301,10 +529,9 @@ class MainWindow(Gtk.ApplicationWindow):
         input_box.set_margin_top(4)
         input_box.set_margin_bottom(4)
 
-        self._input = Gtk.Entry()
+        self._input = FormattedInput()
         self._input.set_hexpand(True)
-        self._input.set_placeholder_text("Type a message...")
-        self._input.connect("activate", self._on_send)
+        self._input.connect("send", self._on_send)
         self._input.set_sensitive(False)
         input_box.append(self._input)
 
@@ -621,13 +848,13 @@ class MainWindow(Gtk.ApplicationWindow):
     # -- sending messages -----------------------------------------------------
 
     def _on_send(self, _widget: Gtk.Widget) -> None:
-        text = self._input.get_text().strip()
+        text = self._input.get_irc_text().strip()
         net = self._current_network
         ch = self._current_channel
         q = self._current_query
         if not text or not net or (not ch and not q):
             return
-        self._input.set_text("")
+        self._input.clear()
 
         msg_type = "privmsg"
         if text.startswith("/me "):
@@ -819,7 +1046,6 @@ class MainWindow(Gtk.ApplicationWindow):
     def _make_popover(
         self, x: float, y: float,
     ) -> tuple[Gtk.Popover, Gtk.Box]:
-        from gi.repository import Gdk  # noqa: E402
         self._dismiss_popover()
         menu = Gtk.Popover()
         menu.set_parent(self._sidebar)
