@@ -220,6 +220,8 @@ _TAG_TO_IRC: dict[str, str] = {
     "irc_mono": "\x11",
 }
 
+_URL_RE = re.compile(r"https?://[^\s<>]+(?<![.,;:!?\"')>])")
+
 
 class FormattedInput(Gtk.Frame):
     """Single-line WYSIWYG input with IRC formatting support.
@@ -525,6 +527,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self._buf.create_tag(
             "mention", weight=Pango.Weight.BOLD, background="#fce4b8",
         )
+        self._buf.create_tag(
+            "link", foreground="#1a0dab", underline=Pango.Underline.SINGLE,
+        )
+
+        click_ctrl = Gtk.GestureClick()
+        click_ctrl.connect("released", self._on_msg_click)
+        self._msg_view.add_controller(click_ctrl)
+        motion_ctrl = Gtk.EventControllerMotion()
+        motion_ctrl.connect("motion", self._on_msg_motion)
+        self._msg_view.add_controller(motion_ctrl)
+        self._hand_cursor = Gdk.Cursor.new_from_name("pointer")
+        self._text_cursor = Gdk.Cursor.new_from_name("text")
 
         self._msg_sw.set_child(self._msg_view)
         right.append(self._msg_sw)
@@ -839,43 +853,93 @@ class MainWindow(Gtk.ApplicationWindow):
             bg = styles.get("bg")
             if isinstance(bg, str):
                 tags.append(self._get_color_tag(bg, "bg"))
-            self._insert_with_mentions(
-                span_text, tags, mention_re, mention_tag,
-            )
+            self._insert_rich(span_text, tags, mention_re, mention_tag)
 
-    def _insert_with_mentions(
+    def _insert_rich(
         self, text: str, tags: list[Gtk.TextTag],
         mention_re: re.Pattern[str] | None,
         mention_tag: Gtk.TextTag | None,
     ) -> None:
-        if not mention_re or not mention_tag:
+        """Insert text, highlighting URLs and nick mentions."""
+        link_tag = self._buf.get_tag_table().lookup("link")
+        regions: list[tuple[int, int, Gtk.TextTag]] = []
+        if link_tag:
+            for m in _URL_RE.finditer(text):
+                regions.append((m.start(), m.end(), link_tag))
+        if mention_re and mention_tag:
+            for m in mention_re.finditer(text):
+                regions.append((m.start(), m.end(), mention_tag))
+        if not regions:
             end = self._buf.get_end_iter()
             if tags:
                 self._buf.insert_with_tags(end, text, *tags)
             else:
                 self._buf.insert(end, text)
             return
+        regions.sort(key=lambda r: r[0])
+        merged: list[tuple[int, int, Gtk.TextTag]] = []
+        for r in regions:
+            if merged and r[0] < merged[-1][1]:
+                continue
+            merged.append(r)
         pos = 0
-        for m in mention_re.finditer(text):
-            if m.start() > pos:
-                end = self._buf.get_end_iter()
-                chunk = text[pos:m.start()]
-                if tags:
-                    self._buf.insert_with_tags(end, chunk, *tags)
-                else:
-                    self._buf.insert(end, chunk)
+        for start, end_pos, extra_tag in merged:
+            if start > pos:
+                self._insert_plain(text[pos:start], tags)
             end = self._buf.get_end_iter()
             self._buf.insert_with_tags(
-                end, m.group(), *tags, mention_tag,
+                end, text[start:end_pos], *tags, extra_tag,
             )
-            pos = m.end()
+            pos = end_pos
         if pos < len(text):
-            end = self._buf.get_end_iter()
-            chunk = text[pos:]
-            if tags:
-                self._buf.insert_with_tags(end, chunk, *tags)
-            else:
-                self._buf.insert(end, chunk)
+            self._insert_plain(text[pos:], tags)
+
+    def _insert_plain(
+        self, text: str, tags: list[Gtk.TextTag],
+    ) -> None:
+        end = self._buf.get_end_iter()
+        if tags:
+            self._buf.insert_with_tags(end, text, *tags)
+        else:
+            self._buf.insert(end, text)
+
+    def _iter_at_xy(self, x: float, y: float) -> Gtk.TextIter | None:
+        bx, by = self._msg_view.window_to_buffer_coords(
+            Gtk.TextWindowType.WIDGET, int(x), int(y),
+        )
+        ok, it = self._msg_view.get_iter_at_location(bx, by)
+        return it if ok else None
+
+    def _url_at_iter(self, it: Gtk.TextIter) -> str | None:
+        link_tag = self._buf.get_tag_table().lookup("link")
+        if not link_tag or not it.has_tag(link_tag):
+            return None
+        start = it.copy()
+        start.backward_to_tag_toggle(link_tag)
+        end = it.copy()
+        end.forward_to_tag_toggle(link_tag)
+        return self._buf.get_text(start, end, False)
+
+    def _on_msg_click(
+        self, _gesture: Gtk.GestureClick,
+        _n_press: int, x: float, y: float,
+    ) -> None:
+        it = self._iter_at_xy(x, y)
+        if not it:
+            return
+        url = self._url_at_iter(it)
+        if url:
+            Gtk.show_uri(self, url, 0)
+
+    def _on_msg_motion(
+        self, _ctrl: Gtk.EventControllerMotion,
+        x: float, y: float,
+    ) -> None:
+        it = self._iter_at_xy(x, y)
+        if it and self._url_at_iter(it):
+            self._msg_view.set_cursor(self._hand_cursor)
+        else:
+            self._msg_view.set_cursor(self._text_cursor)
 
     @staticmethod
     def _format_time(iso: str) -> str:
