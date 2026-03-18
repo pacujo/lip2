@@ -12,7 +12,7 @@ from typing import Any, Callable
 import gi
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, GLib, GObject, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from lip2.api import LipserviceAPI, APIError  # noqa: E402
 from lip2.irc_format import parse as parse_irc  # noqa: E402
@@ -544,8 +544,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._msg_view.set_right_margin(8)
         self._msg_view.set_top_margin(4)
         self._msg_view.set_bottom_margin(4)
+        ctx_gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        ctx_gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        ctx_gesture.connect("pressed", self._on_msg_context)
+        self._msg_view.add_controller(ctx_gesture)
 
         self._buf = self._msg_view.get_buffer()
+        self._buf.set_enable_undo(False)
         self._buf.create_tag("nick", weight=Pango.Weight.BOLD)
         self._buf.create_tag(
             "meta", style=Pango.Style.ITALIC, foreground="#888888",
@@ -640,6 +645,22 @@ class MainWindow(Gtk.ApplicationWindow):
         win_key = Gtk.EventControllerKey()
         win_key.connect("key-pressed", self._on_win_key)
         self.add_controller(win_key)
+
+        for name, cb in [
+            ("copy", lambda *_: self._msg_view.emit("copy-clipboard")),
+            ("select-all", lambda *_: self._buf.select_range(
+                self._buf.get_start_iter(), self._buf.get_end_iter(),
+            )),
+            ("search", lambda *_: self._toggle_search()),
+        ]:
+            action = Gio.SimpleAction(name=name)
+            action.connect("activate", cb)
+            self.add_action(action)
+
+        self._ctx_menu = Gio.Menu()
+        self._ctx_menu.append("Copy", "win.copy")
+        self._ctx_menu.append("Select All", "win.select-all")
+        self._ctx_menu.append("Search\u2026", "win.search")
 
         dark = _load_config().get("dark") == "true"
         if dark:
@@ -1018,6 +1039,22 @@ class MainWindow(Gtk.ApplicationWindow):
         end = it.copy()
         end.forward_to_tag_toggle(link_tag)
         return self._buf.get_text(start, end, False)
+
+    def _on_msg_context(
+        self, gesture: Gtk.GestureClick,
+        _n_press: int, x: float, y: float,
+    ) -> None:
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        self._dismiss_popover()
+        popover = Gtk.PopoverMenu(menu_model=self._ctx_menu)
+        popover.set_parent(self._msg_view)
+        rect = Gdk.Rectangle()
+        rect.x, rect.y = int(x), int(y)
+        rect.width = rect.height = 1
+        popover.set_pointing_to(rect)
+        popover.set_has_arrow(True)
+        self._popover = popover
+        popover.popup()
 
     def _on_msg_click(
         self, _gesture: Gtk.GestureClick,
