@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -450,6 +451,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._channel_rows: dict[tuple[str, str], SidebarRow] = {}
         self._query_rows: dict[tuple[str, str], SidebarRow] = {}
         self._pointers: dict[str, str] = {}
+        self._nicks: dict[str, str] = {}
         self._sse_running = False
 
         self._build_ui()
@@ -520,6 +522,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._buf.create_tag("irc_underline", underline=Pango.Underline.SINGLE)
         self._buf.create_tag("irc_strike", strikethrough=True)
         self._buf.create_tag("irc_mono", family="Monospace")
+        self._buf.create_tag(
+            "mention", weight=Pango.Weight.BOLD, background="#fce4b8",
+        )
 
         self._msg_sw.set_child(self._msg_view)
         right.append(self._msg_sw)
@@ -605,6 +610,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self._network_rows.clear()
             self._channel_rows.clear()
             self._query_rows.clear()
+            self._nicks = {
+                net["name"]: net["nick"]
+                for net in networks if net.get("nick")
+            }
             reselect: SidebarRow | None = None
             first_selectable: SidebarRow | None = None
             for net in networks:
@@ -788,10 +797,25 @@ class MainWindow(Gtk.ApplicationWindow):
                 tag = self._buf.create_tag(name, background=color)
         return tag
 
+    def _mention_re(self) -> re.Pattern[str] | None:
+        net = self._current_network
+        if not net:
+            return None
+        nick = self._nicks.get(net)
+        if not nick:
+            return None
+        escaped = re.escape(nick)
+        nick_char = r"[A-Za-z0-9\[\]\\`_^{|}\-]"
+        return re.compile(
+            rf"(?<!{nick_char}){escaped}(?!{nick_char})", re.IGNORECASE,
+        )
+
     def _insert_irc_formatted(
         self, text: str, base_tags: list[str] | None = None,
     ) -> None:
         tag_table = self._buf.get_tag_table()
+        mention_re = self._mention_re()
+        mention_tag = tag_table.lookup("mention")
         style_map = {
             "bold": "irc_bold", "italic": "irc_italic",
             "underline": "irc_underline", "strikethrough": "irc_strike",
@@ -815,11 +839,43 @@ class MainWindow(Gtk.ApplicationWindow):
             bg = styles.get("bg")
             if isinstance(bg, str):
                 tags.append(self._get_color_tag(bg, "bg"))
+            self._insert_with_mentions(
+                span_text, tags, mention_re, mention_tag,
+            )
+
+    def _insert_with_mentions(
+        self, text: str, tags: list[Gtk.TextTag],
+        mention_re: re.Pattern[str] | None,
+        mention_tag: Gtk.TextTag | None,
+    ) -> None:
+        if not mention_re or not mention_tag:
             end = self._buf.get_end_iter()
             if tags:
-                self._buf.insert_with_tags(end, span_text, *tags)
+                self._buf.insert_with_tags(end, text, *tags)
             else:
-                self._buf.insert(end, span_text)
+                self._buf.insert(end, text)
+            return
+        pos = 0
+        for m in mention_re.finditer(text):
+            if m.start() > pos:
+                end = self._buf.get_end_iter()
+                chunk = text[pos:m.start()]
+                if tags:
+                    self._buf.insert_with_tags(end, chunk, *tags)
+                else:
+                    self._buf.insert(end, chunk)
+            end = self._buf.get_end_iter()
+            self._buf.insert_with_tags(
+                end, m.group(), *tags, mention_tag,
+            )
+            pos = m.end()
+        if pos < len(text):
+            end = self._buf.get_end_iter()
+            chunk = text[pos:]
+            if tags:
+                self._buf.insert_with_tags(end, chunk, *tags)
+            else:
+                self._buf.insert(end, chunk)
 
     @staticmethod
     def _format_time(iso: str) -> str:
@@ -950,6 +1006,13 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._scroll_to_bottom()
             if state == "connected":
                 self._load_sidebar()
+
+        elif ev_type == "nick":
+            net_name = data.get("network", "")
+            old = data.get("old_nick", "")
+            new = data.get("new_nick", "")
+            if net_name and self._nicks.get(net_name) == old:
+                self._nicks[net_name] = new
 
         elif ev_type in ("join", "part", "kick"):
             self._load_sidebar()
