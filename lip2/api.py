@@ -54,6 +54,8 @@ class LipserviceAPI:
         return resp.json()
 
     def _refresh_token(self) -> None:
+        if not self._username or not self._password:
+            return
         resp = self._client.request("POST", "/auth/token", json={
             "username": self._username, "password": self._password,
         })

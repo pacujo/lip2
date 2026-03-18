@@ -189,15 +189,14 @@ class LoginWindow(Gtk.Window):
         self._btn.set_sensitive(False)
         self._error.set_visible(False)
 
-        def attempt() -> str:
+        def attempt() -> LipserviceAPI:
             api = LipserviceAPI(url)
             api.login(user, pw)
-            return api.token or ""
+            return api
 
-        def on_ok(token: str) -> None:
+        def on_ok(api: LipserviceAPI) -> None:
             _save_config(url, user)
-            self._app.api = LipserviceAPI(url)
-            self._app.api.token = token
+            self._app.api = api
             self.close()
             self._app.open_main_window()
 
