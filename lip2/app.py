@@ -114,11 +114,15 @@ def _load_config() -> dict[str, str]:
 
 
 def _save_config(url: str, username: str) -> None:
+    cfg = _load_config()
+    cfg["url"] = url
+    cfg["username"] = username
+    _save_config_dict(cfg)
+
+
+def _save_config_dict(cfg: dict[str, str]) -> None:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    lines = [
-        f'url = "{url}"\n',
-        f'username = "{username}"\n',
-    ]
+    lines = [f'{k} = "{v}"\n' for k, v in cfg.items()]
     _CONFIG_FILE.write_text("".join(lines))
 
 
@@ -262,6 +266,16 @@ class FormattedInput(Gtk.Frame):
         italic_btn.get_child().set_markup("<i>I</i>")
         underline_btn = self._toggle_buttons["irc_underline"]
         underline_btn.get_child().set_markup("<u>U</u>")
+
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        toolbar.append(spacer)
+
+        self.night_btn = Gtk.ToggleButton(label="\u263e")
+        self.night_btn.set_has_frame(False)
+        self.night_btn.set_focusable(False)
+        self.night_btn.set_tooltip_text("Toggle night mode")
+        toolbar.append(self.night_btn)
 
         vbox.append(toolbar)
 
@@ -555,11 +569,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self._input.set_hexpand(True)
         self._input.connect("send", self._on_send)
         self._input.set_sensitive(False)
+        self._input.night_btn.connect("toggled", self._on_night_toggled)
         input_box.append(self._input)
 
         right.append(input_box)
         paned.set_end_child(right)
         self.set_child(paned)
+
+        dark = _load_config().get("dark") == "true"
+        if dark:
+            self._input.night_btn.set_active(True)
+        self._apply_color_scheme(dark)
 
     # -- session management ---------------------------------------------------
 
@@ -967,6 +987,34 @@ class MainWindow(Gtk.ApplicationWindow):
             adj.set_value(adj.get_upper() - adj.get_page_size())
             return False
         GLib.idle_add(scroll)
+
+    # -- night mode -----------------------------------------------------------
+
+    def _apply_color_scheme(self, dark: bool) -> None:
+        settings = Gtk.Settings.get_default()
+        if settings:
+            settings.set_property(
+                "gtk-application-prefer-dark-theme", dark,
+            )
+        self._input.night_btn.set_label("\u2600" if dark else "\u263e")
+        tag_table = self._buf.get_tag_table()
+        mention = tag_table.lookup("mention")
+        if mention:
+            mention.set_property(
+                "background", "#5a4a20" if dark else "#fce4b8",
+            )
+        link = tag_table.lookup("link")
+        if link:
+            link.set_property(
+                "foreground", "#6ea8fe" if dark else "#1a0dab",
+            )
+
+    def _on_night_toggled(self, btn: Gtk.ToggleButton) -> None:
+        dark = btn.get_active()
+        self._apply_color_scheme(dark)
+        cfg = _load_config()
+        cfg["dark"] = "true" if dark else "false"
+        _save_config_dict(cfg)
 
     # -- sending messages -----------------------------------------------------
 
