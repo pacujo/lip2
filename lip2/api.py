@@ -22,6 +22,8 @@ class LipserviceAPI:
     def __init__(self, base_url: str = "http://127.0.0.1:8080/api") -> None:
         self.base_url = base_url.rstrip("/")
         self.token: str | None = None
+        self._username: str | None = None
+        self._password: str | None = None
         self._client = httpx.Client(base_url=self.base_url, timeout=10.0)
 
     @property
@@ -32,6 +34,11 @@ class LipserviceAPI:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         resp = self._client.request(method, path, headers=self._auth, **kwargs)
+        if resp.status_code == 401 and self._username and self._password:
+            self._refresh_token()
+            resp = self._client.request(
+                method, path, headers=self._auth, **kwargs,
+            )
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", {})
@@ -46,7 +53,16 @@ class LipserviceAPI:
             return None
         return resp.json()
 
+    def _refresh_token(self) -> None:
+        resp = self._client.request("POST", "/auth/token", json={
+            "username": self._username, "password": self._password,
+        })
+        if resp.status_code < 400:
+            self.token = resp.json().get("token")
+
     def login(self, username: str, password: str) -> str:
+        self._username = username
+        self._password = password
         data = self._request("POST", "/auth/token", json={
             "username": username, "password": password,
         })
@@ -177,6 +193,7 @@ class LipserviceAPI:
         self._request("PUT", "/session", json=data)
 
     def event_stream(self) -> Generator[dict[str, Any], None, None]:
+        self._refresh_token()
         stream_client = httpx.Client(
             base_url=self.base_url, timeout=None,
         )
