@@ -460,6 +460,9 @@ class FormattedInput(Gtk.Frame):
         return "".join(result)
 
 
+_PAGE_SIZE = 100
+
+
 # -- Main window --------------------------------------------------------------
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -472,7 +475,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._current_channel: str | None = None
         self._current_query: str | None = None
         self._last_msg_id: str | None = None
+        self._oldest_msg_id: str | None = None
+        self._has_more: bool = False
+        self._loading_more: bool = False
+        self._msg_count: int = 0
         self._last_date: str | None = None
+        self._prepend_date: str | None = None
+        self._insert_mark: Gtk.TextMark | None = None
         self._network_rows: dict[str, SidebarRow] = {}
         self._channel_rows: dict[tuple[str, str], SidebarRow] = {}
         self._query_rows: dict[tuple[str, str], SidebarRow] = {}
@@ -565,6 +574,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._text_cursor = Gdk.Cursor.new_from_name("text")
 
         self._msg_sw.set_child(self._msg_view)
+        self._vadj = self._msg_sw.get_vadjustment()
+        self._vadj.connect("value-changed", self._on_scroll)
         right.append(self._msg_sw)
 
         input_box = Gtk.Box(
@@ -761,8 +772,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def fetch() -> dict[str, Any]:
             if ch:
-                return self._app.api.list_messages(net, ch)
-            return self._app.api.list_private_messages(net, q)
+                return self._app.api.list_messages(
+                    net, ch, limit=_PAGE_SIZE,
+                )
+            return self._app.api.list_private_messages(
+                net, q, limit=_PAGE_SIZE,
+            )
 
         def display(data: dict[str, Any]) -> None:
             if self._current_network != net:
@@ -773,62 +788,85 @@ class MainWindow(Gtk.ApplicationWindow):
                 return
             self._buf.set_text("")
             self._last_date = None
+            self._prepend_date = None
+            self._msg_count = 0
             messages = data.get("messages", [])
             for msg in messages:
                 self._append_message(msg)
+                self._msg_count += 1
             if messages:
                 self._last_msg_id = messages[-1]["id"]
+                self._oldest_msg_id = messages[0]["id"]
+                self._prepend_date = self._local_date(
+                    messages[0].get("time", ""),
+                )
             else:
                 self._last_msg_id = None
+                self._oldest_msg_id = None
+            self._has_more = data.get("has_more", False)
+            self._loading_more = False
             self._scroll_to_bottom()
 
         _run_in_thread(fetch, display, lambda e: self._show_error(str(e)))
+
+    def _ipt(self) -> Gtk.TextIter:
+        """Return the current insertion point (mark-aware)."""
+        if self._insert_mark:
+            return self._buf.get_iter_at_mark(self._insert_mark)
+        return self._buf.get_end_iter()
+
+    def _insert_tagged(
+        self, text: str, *tags: Gtk.TextTag,
+    ) -> None:
+        """Insert text at _ipt, stripping inherited tags first."""
+        offset = self._ipt().get_offset()
+        self._buf.insert(self._ipt(), text)
+        start = self._buf.get_iter_at_offset(offset)
+        end = self._buf.get_iter_at_offset(offset + len(text))
+        self._buf.remove_all_tags(start, end)
+        for tag in tags:
+            self._buf.apply_tag(tag, start, end)
+
+    def _insert_tagged_by_name(
+        self, text: str, *tag_names: str,
+    ) -> None:
+        """Insert text at _ipt with named tags, stripping inherited tags."""
+        table = self._buf.get_tag_table()
+        tags = [t for n in tag_names if (t := table.lookup(n))]
+        self._insert_tagged(text, *tags)
+
+    def _render_msg(self, msg: dict[str, Any]) -> None:
+        """Render a message line at the current insertion point."""
+        time_str = self._format_time(msg.get("time", ""))
+        self._insert_tagged_by_name(f"[{time_str}] ", "time")
+        msg_type = msg.get("type", "privmsg")
+        sender = msg.get("from", "")
+        if msg_type == "meta":
+            self._insert_tagged_by_name(
+                f"\u2014 {msg['text']} \u2014", "meta",
+            )
+        elif msg_type == "action":
+            self._insert_tagged_by_name(f"* {sender} ", "action")
+            self._insert_irc_formatted(msg["text"], base_tags=["action"])
+        elif msg_type == "notice":
+            self._insert_tagged_by_name(f"-{sender}- ", "nick")
+            self._insert_irc_formatted(msg["text"])
+        else:
+            self._insert_tagged_by_name(f"<{sender}> ", "nick")
+            self._insert_irc_formatted(msg["text"])
 
     def _append_message(self, msg: dict[str, Any]) -> None:
         date_str = self._local_date(msg.get("time", ""))
         if date_str and date_str != self._last_date:
             self._last_date = date_str
-            end = self._buf.get_end_iter()
             if self._buf.get_char_count() > 0:
-                self._buf.insert(end, "\n")
-                end = self._buf.get_end_iter()
-            self._buf.insert_with_tags_by_name(
-                end, f"\u2014 {date_str} \u2014", "meta",
+                self._insert_tagged("\n")
+            self._insert_tagged_by_name(
+                f"\u2014 {date_str} \u2014", "meta",
             )
-
-        end = self._buf.get_end_iter()
         if self._buf.get_char_count() > 0:
-            self._buf.insert(end, "\n")
-            end = self._buf.get_end_iter()
-
-        time_str = self._format_time(msg.get("time", ""))
-        self._buf.insert_with_tags_by_name(
-            end, f"[{time_str}] ", "time",
-        )
-        end = self._buf.get_end_iter()
-
-        msg_type = msg.get("type", "privmsg")
-        sender = msg.get("from", "")
-
-        if msg_type == "meta":
-            self._buf.insert_with_tags_by_name(
-                end, f"\u2014 {msg['text']} \u2014", "meta",
-            )
-        elif msg_type == "action":
-            self._buf.insert_with_tags_by_name(
-                end, f"* {sender} ", "action",
-            )
-            self._insert_irc_formatted(msg["text"], base_tags=["action"])
-        elif msg_type == "notice":
-            self._buf.insert_with_tags_by_name(
-                end, f"-{sender}- ", "nick",
-            )
-            self._insert_irc_formatted(msg["text"])
-        else:
-            self._buf.insert_with_tags_by_name(
-                end, f"<{sender}> ", "nick",
-            )
-            self._insert_irc_formatted(msg["text"])
+            self._insert_tagged("\n")
+        self._render_msg(msg)
 
     def _get_color_tag(
         self, color: str, prop: str,
@@ -901,11 +939,7 @@ class MainWindow(Gtk.ApplicationWindow):
             for m in mention_re.finditer(text):
                 regions.append((m.start(), m.end(), mention_tag))
         if not regions:
-            end = self._buf.get_end_iter()
-            if tags:
-                self._buf.insert_with_tags(end, text, *tags)
-            else:
-                self._buf.insert(end, text)
+            self._insert_tagged(text, *tags)
             return
         regions.sort(key=lambda r: r[0])
         merged: list[tuple[int, int, Gtk.TextTag]] = []
@@ -916,23 +950,11 @@ class MainWindow(Gtk.ApplicationWindow):
         pos = 0
         for start, end_pos, extra_tag in merged:
             if start > pos:
-                self._insert_plain(text[pos:start], tags)
-            end = self._buf.get_end_iter()
-            self._buf.insert_with_tags(
-                end, text[start:end_pos], *tags, extra_tag,
-            )
+                self._insert_tagged(text[pos:start], *tags)
+            self._insert_tagged(text[start:end_pos], *tags, extra_tag)
             pos = end_pos
         if pos < len(text):
-            self._insert_plain(text[pos:], tags)
-
-    def _insert_plain(
-        self, text: str, tags: list[Gtk.TextTag],
-    ) -> None:
-        end = self._buf.get_end_iter()
-        if tags:
-            self._buf.insert_with_tags(end, text, *tags)
-        else:
-            self._buf.insert(end, text)
+            self._insert_tagged(text[pos:], *tags)
 
     def _iter_at_xy(self, x: float, y: float) -> Gtk.TextIter | None:
         bx, by = self._msg_view.window_to_buffer_coords(
@@ -994,10 +1016,127 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _scroll_to_bottom(self) -> None:
         def scroll() -> bool:
-            adj = self._msg_sw.get_vadjustment()
-            adj.set_value(adj.get_upper() - adj.get_page_size())
+            self._vadj.set_value(
+                self._vadj.get_upper() - self._vadj.get_page_size(),
+            )
             return False
         GLib.idle_add(scroll)
+
+    def _is_near_bottom(self) -> bool:
+        return (self._vadj.get_value()
+                >= self._vadj.get_upper()
+                - self._vadj.get_page_size() - 50)
+
+    def _on_scroll(self, adj: Gtk.Adjustment) -> None:
+        if adj.get_upper() <= adj.get_page_size():
+            return
+        if adj.get_value() <= adj.get_page_size() * 0.5:
+            self._load_older()
+
+    def _load_older(self) -> None:
+        if self._loading_more or not self._has_more:
+            return
+        if not self._oldest_msg_id:
+            return
+        net = self._current_network
+        ch = self._current_channel
+        q = self._current_query
+        if not net or (not ch and not q):
+            return
+        self._loading_more = True
+        oldest = self._oldest_msg_id
+
+        def fetch() -> dict[str, Any]:
+            if ch:
+                return self._app.api.list_messages(
+                    net, ch, limit=_PAGE_SIZE, before=oldest,
+                )
+            return self._app.api.list_private_messages(
+                net, q, limit=_PAGE_SIZE, before=oldest,
+            )
+
+        def prepend(data: dict[str, Any]) -> None:
+            if self._current_network != net:
+                return
+            if ch and self._current_channel != ch:
+                return
+            if q and self._current_query != q:
+                return
+            messages = data.get("messages", [])
+            self._has_more = data.get("has_more", False)
+            if not messages:
+                self._loading_more = False
+                return
+            self._oldest_msg_id = messages[0]["id"]
+            old_upper = self._vadj.get_upper()
+            self._strip_top_date_sep()
+            for msg in reversed(messages):
+                self._prepend_message(msg)
+                self._msg_count += 1
+            self._insert_top_date_sep()
+
+            def restore() -> bool:
+                delta = self._vadj.get_upper() - old_upper
+                self._vadj.set_value(self._vadj.get_value() + delta)
+                self._loading_more = False
+                return False
+            GLib.idle_add(restore)
+
+        def on_err(e: Exception) -> None:
+            self._loading_more = False
+            self._show_error(str(e))
+
+        _run_in_thread(fetch, prepend, on_err)
+
+    def _strip_top_date_sep(self) -> None:
+        """Remove a date separator line at the top of the buffer."""
+        start = self._buf.get_start_iter()
+        if start.is_end():
+            return
+        line_end = start.copy()
+        line_end.forward_to_line_end()
+        first_line = self._buf.get_text(start, line_end, False)
+        if first_line.startswith("\u2014") and first_line.endswith("\u2014"):
+            delete_end = line_end.copy()
+            delete_end.forward_char()
+            self._buf.delete(start, delete_end)
+
+    def _insert_top_date_sep(self) -> None:
+        """Insert a date separator at the very top for _prepend_date."""
+        if not self._prepend_date:
+            return
+        mark = self._buf.create_mark(
+            None, self._buf.get_start_iter(), False,
+        )
+        self._insert_mark = mark
+        self._insert_tagged_by_name(
+            f"\u2014 {self._prepend_date} \u2014", "meta",
+        )
+        self._insert_tagged("\n")
+        self._insert_mark = None
+        self._buf.delete_mark(mark)
+
+    def _prepend_message(self, msg: dict[str, Any]) -> None:
+        """Insert a message at the very top of the buffer."""
+        had_content = self._buf.get_char_count() > 0
+        mark = self._buf.create_mark(
+            None, self._buf.get_start_iter(), False,
+        )
+        self._insert_mark = mark
+        date_str = self._local_date(msg.get("time", ""))
+        self._render_msg(msg)
+        if had_content:
+            if (date_str and self._prepend_date
+                    and date_str != self._prepend_date):
+                self._insert_tagged("\n")
+                self._insert_tagged_by_name(
+                    f"\u2014 {self._prepend_date} \u2014", "meta",
+                )
+            self._insert_tagged("\n")
+        if date_str:
+            self._prepend_date = date_str
+        self._insert_mark = None
+        self._buf.delete_mark(mark)
 
     def _update_title_badge(self) -> None:
         has_unread = any(
@@ -1095,9 +1234,11 @@ class MainWindow(Gtk.ApplicationWindow):
                         and ch == self._current_channel):
                     msg_id = data.get("id", "")
                     if msg_id != self._last_msg_id:
+                        was_at_bottom = self._is_near_bottom()
                         self._append_message(data)
                         self._last_msg_id = msg_id
-                        self._scroll_to_bottom()
+                        if was_at_bottom:
+                            self._scroll_to_bottom()
                 else:
                     ch_row = self._channel_rows.get((net, ch))
                     if ch_row:
@@ -1108,9 +1249,11 @@ class MainWindow(Gtk.ApplicationWindow):
                         and nick == self._current_query):
                     msg_id = data.get("id", "")
                     if msg_id != self._last_msg_id:
+                        was_at_bottom = self._is_near_bottom()
                         self._append_message(data)
                         self._last_msg_id = msg_id
-                        self._scroll_to_bottom()
+                        if was_at_bottom:
+                            self._scroll_to_bottom()
                 else:
                     q_row = self._query_rows.get((net, nick))
                     if q_row:

@@ -114,9 +114,12 @@ class LipserviceAPI:
 
     def list_messages(
         self, network: str, channel: str,
-        limit: int = 200, after: str | None = None,
+        limit: int = 200, before: str | None = None,
+        after: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
+        if before:
+            params["before"] = before
         if after:
             params["after"] = after
         return self._request(
@@ -161,9 +164,12 @@ class LipserviceAPI:
 
     def list_private_messages(
         self, network: str, nick: str,
-        limit: int = 200, after: str | None = None,
+        limit: int = 200, before: str | None = None,
+        after: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
+        if before:
+            params["before"] = before
         if after:
             params["after"] = after
         return self._request(
