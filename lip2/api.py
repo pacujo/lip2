@@ -115,16 +115,34 @@ class LipserviceAPI:
     def list_messages(
         self, network: str, channel: str,
         limit: int = 200, before: str | None = None,
-        after: str | None = None,
+        after: str | None = None, around: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
         if before:
             params["before"] = before
         if after:
             params["after"] = after
+        if around:
+            params["around"] = around
         return self._request(
             "GET",
             f"/networks/{quote(network, safe='')}/channels/{_ch(channel)}/messages",
+            params=params,
+        )
+
+    def search_messages(
+        self, network: str, channel: str, query: str,
+        anchor: str | None = None, direction: str = "backward",
+        limit: int = 1,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "q": query, "direction": direction, "limit": limit,
+        }
+        if anchor:
+            params["anchor"] = anchor
+        return self._request(
+            "GET",
+            f"/networks/{quote(network, safe='')}/channels/{_ch(channel)}/messages/search",
             params=params,
         )
 
@@ -165,16 +183,34 @@ class LipserviceAPI:
     def list_private_messages(
         self, network: str, nick: str,
         limit: int = 200, before: str | None = None,
-        after: str | None = None,
+        after: str | None = None, around: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
         if before:
             params["before"] = before
         if after:
             params["after"] = after
+        if around:
+            params["around"] = around
         return self._request(
             "GET",
             f"/networks/{quote(network, safe='')}/messages/{quote(nick, safe='')}",
+            params=params,
+        )
+
+    def search_private_messages(
+        self, network: str, nick: str, query: str,
+        anchor: str | None = None, direction: str = "backward",
+        limit: int = 1,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "q": query, "direction": direction, "limit": limit,
+        }
+        if anchor:
+            params["anchor"] = anchor
+        return self._request(
+            "GET",
+            f"/networks/{quote(network, safe='')}/messages/{quote(nick, safe='')}/search",
             params=params,
         )
 

@@ -563,6 +563,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._buf.create_tag(
             "link", foreground="#1a0dab", underline=Pango.Underline.SINGLE,
         )
+        self._buf.create_tag("search_match", background="#ffe08a")
+        self._buf.create_tag(
+            "search_current", background="#f5c211",
+            weight=Pango.Weight.BOLD,
+        )
 
         click_ctrl = Gtk.GestureClick()
         click_ctrl.connect("released", self._on_msg_click)
@@ -577,6 +582,41 @@ class MainWindow(Gtk.ApplicationWindow):
         self._vadj = self._msg_sw.get_vadjustment()
         self._vadj.connect("value-changed", self._on_scroll)
         right.append(self._msg_sw)
+
+        self._search_bar = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+        )
+        self._search_bar.set_margin_start(4)
+        self._search_bar.set_margin_end(4)
+        self._search_bar.set_margin_top(2)
+        self._search_bar.set_margin_bottom(2)
+        self._search_entry = Gtk.Entry()
+        self._search_entry.set_placeholder_text("Search\u2026")
+        self._search_entry.set_hexpand(True)
+        self._search_entry.connect("activate", self._on_search_next)
+        self._search_bar.append(self._search_entry)
+        prev_btn = Gtk.Button(label="\u25b2")
+        prev_btn.set_tooltip_text("Previous (Shift+Enter)")
+        prev_btn.connect("clicked", self._on_search_prev)
+        self._search_bar.append(prev_btn)
+        next_btn = Gtk.Button(label="\u25bc")
+        next_btn.set_tooltip_text("Next (Enter)")
+        next_btn.connect("clicked", self._on_search_next)
+        self._search_bar.append(next_btn)
+        close_btn = Gtk.Button(label="\u2715")
+        close_btn.connect("clicked", self._on_search_close)
+        self._search_bar.append(close_btn)
+        self._search_bar.set_visible(False)
+        right.append(self._search_bar)
+
+        search_key = Gtk.EventControllerKey()
+        search_key.connect("key-pressed", self._on_search_key)
+        self._search_entry.add_controller(search_key)
+
+        self._search_query: str = ""
+        self._search_match_id: str | None = None
+        self._search_positions: list[tuple[int, int]] = []
+        self._search_idx: int = -1
 
         input_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
@@ -596,6 +636,10 @@ class MainWindow(Gtk.ApplicationWindow):
         right.append(input_box)
         paned.set_end_child(right)
         self.set_child(paned)
+
+        win_key = Gtk.EventControllerKey()
+        win_key.connect("key-pressed", self._on_win_key)
+        self.add_controller(win_key)
 
         dark = _load_config().get("dark") == "true"
         if dark:
@@ -759,6 +803,8 @@ class MainWindow(Gtk.ApplicationWindow):
         row.set_unread(False)
         self._update_title_badge()
         self._input.set_sensitive(True)
+        if self._search_bar.get_visible():
+            self._close_search()
         self._input.grab_focus()
         self._load_messages()
         self._save_session()
@@ -1166,6 +1212,16 @@ class MainWindow(Gtk.ApplicationWindow):
             link.set_property(
                 "foreground", "#6ea8fe" if dark else "#1a0dab",
             )
+        search_match = tag_table.lookup("search_match")
+        if search_match:
+            search_match.set_property(
+                "background", "#5a4a00" if dark else "#ffe08a",
+            )
+        search_current = tag_table.lookup("search_current")
+        if search_current:
+            search_current.set_property(
+                "background", "#8a6d00" if dark else "#f5c211",
+            )
 
     def _on_night_toggled(self, btn: Gtk.ToggleButton) -> None:
         dark = btn.get_active()
@@ -1197,6 +1253,227 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._app.api.send_private_message(net, q, text, msg_type)
 
         _run_in_thread(send, None, lambda e: self._show_error(str(e)))
+
+    # -- search ---------------------------------------------------------------
+
+    def _on_win_key(
+        self, _ctrl: Gtk.EventControllerKey,
+        keyval: int, _keycode: int, state: Gdk.ModifierType,
+    ) -> bool:
+        if (keyval == Gdk.KEY_f
+                and state & Gdk.ModifierType.CONTROL_MASK):
+            self._toggle_search()
+            return True
+        if keyval == Gdk.KEY_Escape and self._search_bar.get_visible():
+            self._close_search()
+            return True
+        return False
+
+    def _on_search_key(
+        self, _ctrl: Gtk.EventControllerKey,
+        keyval: int, _keycode: int, state: Gdk.ModifierType,
+    ) -> bool:
+        if keyval == Gdk.KEY_Escape:
+            self._close_search()
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            if state & Gdk.ModifierType.SHIFT_MASK:
+                self._on_search_prev()
+            else:
+                self._on_search_next()
+            return True
+        return False
+
+    def _toggle_search(self) -> None:
+        if self._search_bar.get_visible():
+            self._close_search()
+        else:
+            self._search_bar.set_visible(True)
+            self._search_entry.grab_focus()
+
+    def _close_search(self) -> None:
+        self._search_bar.set_visible(False)
+        self._clear_search_highlights()
+        self._search_query = ""
+        self._search_match_id = None
+        self._input.grab_focus()
+
+    def _on_search_close(self, *_args: Any) -> None:
+        self._close_search()
+
+    def _on_search_next(self, *_args: Any) -> None:
+        self._do_search("forward")
+
+    def _on_search_prev(self, *_args: Any) -> None:
+        self._do_search("backward")
+
+    def _do_search(self, direction: str) -> None:
+        query = self._search_entry.get_text().strip()
+        if not query:
+            return
+        new_query = query != self._search_query
+        if new_query:
+            self._search_query = query
+            self._search_match_id = None
+            self._rescan_matches(query)
+            if self._search_positions:
+                self._search_idx = len(self._search_positions) - 1
+                self._show_current_match()
+                return
+        elif self._navigate_local(direction):
+            return
+        self._search_server(query, direction)
+
+    def _rescan_matches(self, query: str) -> None:
+        self._clear_search_highlights()
+        self._search_positions.clear()
+        it = self._buf.get_start_iter()
+        while True:
+            result = it.forward_search(
+                query, Gtk.TextSearchFlags.CASE_INSENSITIVE, None,
+            )
+            if not result:
+                break
+            ms, me = result
+            self._buf.apply_tag_by_name("search_match", ms, me)
+            self._search_positions.append(
+                (ms.get_offset(), me.get_offset()),
+            )
+            it = me
+
+    def _navigate_local(self, direction: str) -> bool:
+        if not self._search_positions:
+            return False
+        if direction == "backward":
+            new_idx = self._search_idx - 1
+        else:
+            new_idx = self._search_idx + 1
+        if 0 <= new_idx < len(self._search_positions):
+            self._search_idx = new_idx
+            self._show_current_match()
+            return True
+        return False
+
+    def _show_current_match(self) -> None:
+        if not (0 <= self._search_idx < len(self._search_positions)):
+            return
+        start = self._buf.get_start_iter()
+        end = self._buf.get_end_iter()
+        self._buf.remove_tag_by_name("search_current", start, end)
+        s_off, e_off = self._search_positions[self._search_idx]
+        ms = self._buf.get_iter_at_offset(s_off)
+        me = self._buf.get_iter_at_offset(e_off)
+        self._buf.apply_tag_by_name("search_current", ms, me)
+        mark = self._buf.create_mark(None, ms, True)
+        self._msg_view.scroll_to_mark(mark, 0.1, True, 0.0, 0.5)
+        self._buf.delete_mark(mark)
+
+    def _search_server(self, query: str, direction: str) -> None:
+        net = self._current_network
+        ch = self._current_channel
+        q = self._current_query
+        if not net or (not ch and not q):
+            return
+        anchor = self._search_match_id
+
+        def fetch() -> dict[str, Any]:
+            if ch:
+                return self._app.api.search_messages(
+                    net, ch, query, anchor=anchor, direction=direction,
+                )
+            return self._app.api.search_private_messages(
+                net, q, query, anchor=anchor, direction=direction,
+            )
+
+        def show(data: dict[str, Any]) -> None:
+            msgs = data.get("messages", [])
+            if not msgs:
+                return
+            match_msg = msgs[0]
+            self._search_match_id = match_msg["id"]
+            if self._msg_in_buffer(match_msg["id"]):
+                self._rescan_matches(query)
+                self._jump_to_nearest(match_msg["id"], direction)
+            else:
+                self._load_around(match_msg["id"], query, direction)
+
+        _run_in_thread(fetch, show, lambda e: self._show_error(str(e)))
+
+    def _msg_in_buffer(self, msg_id: str) -> bool:
+        oldest = self._oldest_msg_id
+        newest = self._last_msg_id
+        if not oldest or not newest:
+            return False
+        return oldest <= msg_id <= newest
+
+    def _jump_to_nearest(
+        self, msg_id: str, direction: str,
+    ) -> None:
+        """Set search_idx to the match nearest to msg_id's position."""
+        if direction == "backward":
+            self._search_idx = len(self._search_positions) - 1
+        else:
+            self._search_idx = 0
+        self._show_current_match()
+
+    def _load_around(
+        self, msg_id: str, query: str, direction: str,
+    ) -> None:
+        net = self._current_network
+        ch = self._current_channel
+        q = self._current_query
+        if not net or (not ch and not q):
+            return
+
+        def fetch() -> dict[str, Any]:
+            if ch:
+                return self._app.api.list_messages(
+                    net, ch, limit=_PAGE_SIZE, around=msg_id,
+                )
+            return self._app.api.list_private_messages(
+                net, q, limit=_PAGE_SIZE, around=msg_id,
+            )
+
+        def display(data: dict[str, Any]) -> None:
+            if self._current_network != net:
+                return
+            if ch and self._current_channel != ch:
+                return
+            if q and self._current_query != q:
+                return
+            self._buf.set_text("")
+            self._last_date = None
+            self._prepend_date = None
+            self._msg_count = 0
+            messages = data.get("messages", [])
+            for msg in messages:
+                self._append_message(msg)
+                self._msg_count += 1
+            if messages:
+                self._last_msg_id = messages[-1]["id"]
+                self._oldest_msg_id = messages[0]["id"]
+                self._prepend_date = self._local_date(
+                    messages[0].get("time", ""),
+                )
+            else:
+                self._last_msg_id = None
+                self._oldest_msg_id = None
+            self._has_more = data.get("has_more", False)
+            self._loading_more = False
+
+            def highlight() -> bool:
+                self._rescan_matches(query)
+                self._jump_to_nearest(msg_id, direction)
+                return False
+            GLib.idle_add(highlight)
+
+        _run_in_thread(fetch, display, lambda e: self._show_error(str(e)))
+
+    def _clear_search_highlights(self) -> None:
+        start = self._buf.get_start_iter()
+        end = self._buf.get_end_iter()
+        self._buf.remove_tag_by_name("search_match", start, end)
+        self._buf.remove_tag_by_name("search_current", start, end)
 
     # -- SSE event stream -----------------------------------------------------
 
