@@ -299,6 +299,7 @@ class FormattedInput(Gtk.Frame):
 
         self._active_tags: set[str] = set()
         self._updating_buttons = False
+        self._max_bytes = 400
         self._ibuf.connect("insert-text", self._on_insert_text)
 
         key_ctrl = Gtk.EventControllerKey()
@@ -376,6 +377,14 @@ class FormattedInput(Gtk.Frame):
         self, buf: Gtk.TextBuffer, loc: Gtk.TextIter,
         text: str, _length: int,
     ) -> None:
+        current = buf.get_text(
+            buf.get_start_iter(), buf.get_end_iter(), False,
+        )
+        if len(current.encode("utf-8")) + len(text.encode("utf-8")) \
+                > self._max_bytes:
+            GObject.signal_stop_emission_by_name(buf, "insert-text")
+            return
+
         if not self._active_tags:
             return
 
