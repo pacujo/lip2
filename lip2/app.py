@@ -361,11 +361,14 @@ class FormattedInput(Gtk.Frame):
         if not self._active_tags:
             return
 
+        tags_snapshot = set(self._active_tags)
+        offset = loc.get_offset()
+        text_len = len(text)
+
         def apply_after() -> bool:
-            end = buf.get_iter_at_mark(buf.get_insert())
-            start = end.copy()
-            start.backward_chars(len(text))
-            for tag_name in self._active_tags:
+            start = buf.get_iter_at_offset(offset)
+            end = buf.get_iter_at_offset(offset + text_len)
+            for tag_name in tags_snapshot:
                 tag = buf.get_tag_table().lookup(tag_name)
                 if tag:
                     buf.apply_tag(tag, start, end)
@@ -848,7 +851,7 @@ class MainWindow(Gtk.ApplicationWindow):
     # -- sending messages -----------------------------------------------------
 
     def _on_send(self, _widget: Gtk.Widget) -> None:
-        text = self._input.get_irc_text().strip()
+        text = self._input.get_irc_text().strip(" \t\n\r")
         net = self._current_network
         ch = self._current_channel
         q = self._current_query
