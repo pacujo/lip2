@@ -47,6 +47,7 @@ class SidebarRow(Gtk.ListBoxRow):
         self.channel = channel
         self.query = query
         self.net_state = state
+        self._unread = False
         self._label = Gtk.Label()
         self._label.set_xalign(0)
         self._label.set_margin_start(20 if (channel or query) else 8)
@@ -65,6 +66,7 @@ class SidebarRow(Gtk.ListBoxRow):
     def set_unread(self, unread: bool) -> None:
         if not self.is_selectable_target:
             return
+        self._unread = unread
         name = GLib.markup_escape_text(self.channel or self.query or "")
         if self.query:
             name = f"<i>{name}</i>"
@@ -736,6 +738,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._current_query = row.query
             self._header.set_text(f"{row.network} / {row.query}")
         row.set_unread(False)
+        self._update_title_badge()
         self._input.set_sensitive(True)
         self._input.grab_focus()
         self._load_messages()
@@ -988,6 +991,14 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         GLib.idle_add(scroll)
 
+    def _update_title_badge(self) -> None:
+        has_unread = any(
+            r._unread for r in self._channel_rows.values()
+        ) or any(
+            r._unread for r in self._query_rows.values()
+        )
+        self.set_title("* Lip2" if has_unread else "Lip2")
+
     # -- night mode -----------------------------------------------------------
 
     def _apply_color_scheme(self, dark: bool) -> None:
@@ -1083,6 +1094,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     ch_row = self._channel_rows.get((net, ch))
                     if ch_row:
                         ch_row.set_unread(True)
+                        self._update_title_badge()
             elif nick:
                 if (net == self._current_network
                         and nick == self._current_query):
@@ -1097,6 +1109,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         q_row.set_unread(True)
                     elif net:
                         self._add_query_row(net, nick, unread=True)
+                    self._update_title_badge()
 
         elif ev_type == "network_state":
             net_name = data.get("network", "")
