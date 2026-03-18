@@ -1053,6 +1053,7 @@ class MainWindow(Gtk.ApplicationWindow):
         rect.width = rect.height = 1
         popover.set_pointing_to(rect)
         popover.set_has_arrow(True)
+        popover.connect("closed", lambda *_: self._dismiss_popover())
         self._popover = popover
         popover.popup()
 
