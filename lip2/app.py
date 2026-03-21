@@ -2070,6 +2070,10 @@ class Lip2App(Gtk.Application):
         self.api: LipserviceAPI | None = None
 
     def do_activate(self) -> None:
+        existing = self.get_active_window()
+        if existing:
+            existing.present()
+            return
         login = LoginWindow(self)
         login.present()
 
