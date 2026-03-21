@@ -1686,6 +1686,11 @@ class MainWindow(Gtk.ApplicationWindow):
             sensitive=has_networks,
         )
         self._menu_item(
+            box, "Private Message...",
+            lambda: self._on_start_query_clicked(None), menu,
+            sensitive=has_networks,
+        )
+        self._menu_item(
             box, "Add Network...",
             lambda: self._on_add_network_clicked(None), menu,
         )
@@ -1894,6 +1899,68 @@ class MainWindow(Gtk.ApplicationWindow):
         for entry in (name_entry, host_entry, port_entry,
                        nick_entry, nickserv_entry):
             entry.connect("activate", do_add)
+        dialog.set_child(box)
+        dialog.present()
+
+    # -- start query -----------------------------------------------------------
+
+    def _on_start_query_clicked(self, _btn: Gtk.Button) -> None:
+        networks = list(self._network_rows.keys())
+        if not networks:
+            return
+
+        dialog = Gtk.Window(
+            title="Private Message", transient_for=self, modal=True,
+        )
+        dialog.set_default_size(320, 0)
+        dialog.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        box.append(Gtk.Label(label="Network", xalign=0))
+        net_combo = Gtk.DropDown.new_from_strings(networks)
+        if self._current_network and self._current_network in networks:
+            net_combo.set_selected(networks.index(self._current_network))
+        box.append(net_combo)
+
+        box.append(Gtk.Label(label="Nick", xalign=0))
+        nick_entry = Gtk.Entry()
+        nick_entry.set_placeholder_text("nickname")
+        box.append(nick_entry)
+
+        btn_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        )
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: dialog.close())
+        btn_box.append(cancel_btn)
+
+        open_btn = Gtk.Button(label="Open")
+        btn_box.append(open_btn)
+        box.append(btn_box)
+
+        def do_open(_widget: Gtk.Widget) -> None:
+            idx = net_combo.get_selected()
+            net_name = networks[idx]
+            nick = nick_entry.get_text().strip()
+            if not nick:
+                return
+            dialog.close()
+            existing = self._query_rows.get((net_name, nick))
+            if not existing:
+                existing = self._add_query_row(net_name, nick)
+            self._sidebar.select_row(existing)
+
+        open_btn.connect("clicked", do_open)
+        nick_entry.connect("activate", do_open)
+
         dialog.set_child(box)
         dialog.present()
 
