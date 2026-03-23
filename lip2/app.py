@@ -485,6 +485,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._network_rows: dict[str, SidebarRow] = {}
         self._channel_rows: dict[tuple[str, str], SidebarRow] = {}
         self._query_rows: dict[tuple[str, str], SidebarRow] = {}
+        self._service_toggle_rows: dict[str, Gtk.ListBoxRow] = {}
+        self._service_rows: dict[str, list[SidebarRow]] = {}
+        self._services_visible: dict[str, bool] = {}
         self._pointers: dict[str, str] = {}
         self._nicks: dict[str, str] = {}
         self._sse_running = False
@@ -730,6 +733,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self._network_rows.clear()
             self._channel_rows.clear()
             self._query_rows.clear()
+            self._service_toggle_rows.clear()
+            self._service_rows.clear()
             self._nicks = {
                 net["name"]: net["nick"]
                 for net in networks if net.get("nick")
@@ -751,8 +756,15 @@ class MainWindow(Gtk.ApplicationWindow):
                     if (net["name"] == saved_net
                             and ch["name"] == saved_ch):
                         reselect = row
+                user_queries = []
+                service_queries = []
                 for q in net["_queries"]:
                     nick = q["nick"]
+                    if self._is_service(nick):
+                        service_queries.append(nick)
+                    else:
+                        user_queries.append(nick)
+                for nick in user_queries:
                     row = SidebarRow(net["name"], query=nick)
                     self._sidebar.append(row)
                     self._query_rows[(net["name"], nick)] = row
@@ -761,6 +773,24 @@ class MainWindow(Gtk.ApplicationWindow):
                     if (net["name"] == saved_net
                             and nick == saved_q):
                         reselect = row
+                svc_rows: list[SidebarRow] = []
+                for nick in service_queries:
+                    row = SidebarRow(net["name"], query=nick)
+                    row.set_visible(False)
+                    self._sidebar.append(row)
+                    self._query_rows[(net["name"], nick)] = row
+                    svc_rows.append(row)
+                    if (net["name"] == saved_net
+                            and nick == saved_q):
+                        reselect = row
+                self._service_rows[net["name"]] = svc_rows
+                self._services_visible[net["name"]] = False
+                if service_queries:
+                    toggle = self._make_service_toggle(
+                        net["name"], len(service_queries),
+                    )
+                    self._sidebar.append(toggle)
+                    self._service_toggle_rows[net["name"]] = toggle
             if networks and not first_selectable:
                 self._sidebar.append(self._hint_row(
                     "Right-click to join a channel",
@@ -774,6 +804,10 @@ class MainWindow(Gtk.ApplicationWindow):
         _run_in_thread(fetch, populate, lambda e: self._show_error(str(e)))
 
     @staticmethod
+    def _is_service(nick: str) -> bool:
+        return "." in nick or nick.endswith("Serv")
+
+    @staticmethod
     def _hint_row(text: str) -> Gtk.ListBoxRow:
         label = Gtk.Label(label=text)
         label.set_opacity(0.5)
@@ -784,6 +818,43 @@ class MainWindow(Gtk.ApplicationWindow):
         row.set_selectable(False)
         row.set_activatable(False)
         return row
+
+    def _make_service_toggle(
+        self, network: str, count: int,
+    ) -> Gtk.ListBoxRow:
+        btn = Gtk.Button()
+        btn.add_css_class("flat")
+        btn.set_margin_start(20)
+        label = Gtk.Label()
+        label.set_markup(
+            f"<small>{count} hidden</small>"
+        )
+        label.set_xalign(0)
+        btn.set_child(label)
+        btn.connect("clicked", self._on_toggle_services, network)
+        row = Gtk.ListBoxRow()
+        row.set_child(btn)
+        row.set_selectable(False)
+        row.set_activatable(False)
+        return row
+
+    def _on_toggle_services(
+        self, _btn: Gtk.Button, network: str,
+    ) -> None:
+        visible = not self._services_visible.get(network, False)
+        self._services_visible[network] = visible
+        for row in self._service_rows.get(network, []):
+            row.set_visible(visible)
+        toggle = self._service_toggle_rows.get(network)
+        if toggle:
+            count = len(self._service_rows.get(network, []))
+            label = toggle.get_child().get_child()
+            if visible:
+                label.set_markup("<small>Hide services</small>")
+            else:
+                label.set_markup(
+                    f"<small>{count} hidden</small>"
+                )
 
     def _clear_sidebar(self) -> None:
         while True:
@@ -800,6 +871,24 @@ class MainWindow(Gtk.ApplicationWindow):
         self._query_rows[(network, nick)] = row
         if unread:
             row.set_unread(True)
+        if self._is_service(nick):
+            svc = self._service_rows.setdefault(network, [])
+            svc.append(row)
+            if not self._services_visible.get(network, False):
+                row.set_visible(False)
+            toggle = self._service_toggle_rows.get(network)
+            if toggle:
+                label = toggle.get_child().get_child()
+                if self._services_visible.get(network, False):
+                    label.set_markup("<small>Hide services</small>")
+                else:
+                    label.set_markup(
+                        f"<small>{len(svc)} hidden</small>"
+                    )
+            else:
+                toggle = self._make_service_toggle(network, len(svc))
+                self._sidebar.append(toggle)
+                self._service_toggle_rows[network] = toggle
         return row
 
     # -- channel selection & messages -----------------------------------------
