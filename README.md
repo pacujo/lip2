@@ -56,6 +56,11 @@ lip2/
 
 Brunt work by Claude (Anthropic).
 
+## See Also
+
+- [LipApp](../lipapp) — Android client for Lipservice
+- [Lipservice](../lipservice) — IRC bouncer with REST + SSE API
+
 ## License
 
 Apache License 2.0 -- see [LICENSE](LICENSE).
